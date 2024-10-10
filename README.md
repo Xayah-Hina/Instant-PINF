@@ -1,5 +1,5 @@
 # Instant-PINF
 
 ```shell
-python -m pip install tqdm
+python -m pip install opencv-python imageio imageio[ffmpeg] tqdm
 ```
