@@ -35,6 +35,7 @@ class PINFDataParser(DataParser):
         all_focal_lengths = []
         all_cx = []
         all_cy = []
+        all_frames = []
         for video in meta[split + '_videos']:
             image_array = []
             pose_array = []
@@ -54,16 +55,17 @@ class PINFDataParser(DataParser):
             image_height, image_width = all_images[-1].shape[1:3]
             camera_angle_x = video['camera_angle_x']
             focal_length = 0.5 * image_width / np.tan(0.5 * camera_angle_x)
-            all_focal_lengths.append(focal_length)
+            all_focal_lengths.append(float(focal_length))
             cx = image_width / 2.0
             cy = image_height / 2.0
-            all_cx.append(cx)
-            all_cy.append(cy)
+            all_cx.append(float(cx))
+            all_cy.append(float(cy))
+            all_frames.append(frame_num)
 
-        camera_to_world = np.array(all_poses).astype(np.float32)
-        focal_length = np.array(all_focal_lengths).astype(np.float32)
-        cx = np.array(all_cx).astype(np.float32)
-        cy = np.array(all_cy).astype(np.float32)
+        camera_to_world = np.reshape(np.array(all_poses)[:, :, :3, :], (-1, 3, 4))
+        focal_length = np.concatenate([np.repeat(all_focal_lengths[i], all_frames[i]) for i in range(len(all_frames))]).reshape(-1, 1)
+        cx = np.concatenate([np.repeat(all_cx[i], all_frames[i]) for i in range(len(all_frames))]).reshape(-1, 1)
+        cy = np.concatenate([np.repeat(all_cy[i], all_frames[i]) for i in range(len(all_frames))]).reshape(-1, 1)
         cameras = Cameras(
             camera_to_worlds=torch.from_numpy(camera_to_world),
             fx=torch.from_numpy(focal_length),
@@ -72,7 +74,6 @@ class PINFDataParser(DataParser):
             cy=torch.from_numpy(cy),
             camera_type=CameraType.PERSPECTIVE,
         )
-        print(cameras)
 
 
 @dataclasses.dataclass
