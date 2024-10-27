@@ -1,5 +1,6 @@
 import nerfstudio.data.datamanagers.base_datamanager
 import nerfstudio.data.dataparsers.base_dataparser
+import nerfstudio.data.datasets.base_dataset
 import nerfstudio.cameras.cameras
 import nerfstudio.cameras.rays
 import nerfstudio.data.scene_box
@@ -14,26 +15,7 @@ import numpy as np
 import dataclasses
 import pathlib
 import typing
-import copy
 import os
-
-
-class PINFDataSet(torch.utils.data.Dataset):
-    cameras: nerfstudio.cameras.cameras.Cameras
-
-    def __init__(self, dataparser_outputs: nerfstudio.data.dataparsers.base_dataparser.DataparserOutputs, scale_factor: float = 1.0):
-        super().__init__()
-        self._dataparser_outputs = dataparser_outputs
-        self.scale_factor = scale_factor
-        self.scene_box = copy.deepcopy(dataparser_outputs.scene_box)
-        self.metadata = copy.deepcopy(dataparser_outputs.metadata)
-        self.cameras = copy.deepcopy(dataparser_outputs.cameras)
-
-    def __len__(self):
-        pass
-
-    def __getitem__(self, index) -> typing.Dict:
-        pass
 
 
 @dataclasses.dataclass
@@ -140,8 +122,8 @@ class PINFNeRFDataManagerConfig(nerfstudio.data.datamanagers.base_datamanager.Da
 
 class PINFNeRFDataManager(nerfstudio.data.datamanagers.base_datamanager.DataManager):
     config: PINFNeRFDataManagerConfig
-    train_dataset = None
-    eval_dataset = None
+    train_dataset: nerfstudio.data.datasets.base_dataset.InputDataset = None
+    eval_dataset: nerfstudio.data.datasets.base_dataset.InputDataset = None
 
     def __init__(
             self,
@@ -153,6 +135,9 @@ class PINFNeRFDataManager(nerfstudio.data.datamanagers.base_datamanager.DataMana
         self.device = device
         self.dataparser: PINFDataParser = config.dataparser.setup()
         self.test_mode = test_mode
+
+        self.train_dataset = nerfstudio.data.datasets.base_dataset.InputDataset(dataparser_outputs=self.dataparser.get_dataparser_outputs(split="train"))
+        self.eval_dataset = nerfstudio.data.datasets.base_dataset.InputDataset(dataparser_outputs=self.dataparser.get_dataparser_outputs(split="test"))
         super().__init__()
 
     def setup_train(self):
