@@ -7,6 +7,10 @@ import nerfstudio.data.scene_box
 import nerfstudio.utils.io
 import nerfstudio.utils.colors
 import nerfstudio.utils.rich_utils
+import nerfstudio.data.utils.dataloaders
+import nerfstudio.data.utils.nerfstudio_collate
+import nerfstudio.data.pixel_samplers
+import nerfstudio.model_components.ray_generators
 
 import imageio.v2 as imageio
 import torch
@@ -118,12 +122,20 @@ class PINFNeRFDataManagerConfig(nerfstudio.data.datamanagers.base_datamanager.Da
     dataparser: PINFDataParserConfig = dataclasses.field(default_factory=PINFDataParserConfig)
     train_num_rays_per_batch: int = 1024
     eval_num_rays_per_batch: int = 1024
+    train_num_images_to_sample_from: int = -1
+    eval_num_images_to_sample_from: int = -1
+    train_num_times_to_repeat_images: int = -1
+    eval_num_times_to_repeat_images: int = -1
+    collate_fn: typing.Callable[[typing.Any], typing.Any] = typing.cast(typing.Any, staticmethod(nerfstudio.data.utils.nerfstudio_collate.nerfstudio_collate))
+    pixel_sampler: nerfstudio.data.pixel_samplers.PixelSamplerConfig = dataclasses.field(default_factory=nerfstudio.data.pixel_samplers.PixelSamplerConfig)
 
 
 class PINFNeRFDataManager(nerfstudio.data.datamanagers.base_datamanager.DataManager):
     config: PINFNeRFDataManagerConfig
-    train_dataset: nerfstudio.data.datasets.base_dataset.InputDataset = None
-    eval_dataset: nerfstudio.data.datasets.base_dataset.InputDataset = None
+    train_dataset: nerfstudio.data.datasets.base_dataset.InputDataset
+    eval_dataset: nerfstudio.data.datasets.base_dataset.InputDataset
+    train_pixel_sampler: nerfstudio.data.pixel_samplers.PixelSampler
+    eval_pixel_sampler: nerfstudio.data.pixel_samplers.PixelSampler
 
     def __init__(
             self,
@@ -131,28 +143,67 @@ class PINFNeRFDataManager(nerfstudio.data.datamanagers.base_datamanager.DataMana
             device: torch.device,
             test_mode: typing.Literal["test", "val", "inference"] = "val",
     ):
+        super().__init__()
         self.config = config
         self.device = device
-        self.dataparser: PINFDataParser = config.dataparser.setup()
         self.test_mode = test_mode
+        self.world_size = 1
+        self.local_rank = 0
 
+        self.dataparser: PINFDataParser = self.config.dataparser.setup()
         self.train_dataset = nerfstudio.data.datasets.base_dataset.InputDataset(dataparser_outputs=self.dataparser.get_dataparser_outputs(split="train"))
         self.eval_dataset = nerfstudio.data.datasets.base_dataset.InputDataset(dataparser_outputs=self.dataparser.get_dataparser_outputs(split="test"))
-        super().__init__()
 
-    def setup_train(self):
-        assert self.train_dataset is not None
-        nerfstudio.utils.rich_utils.CONSOLE.print("Setting up training dataset...")
+        self.exclude_batch_keys_from_device = self.train_dataset.exclude_batch_keys_from_device
+        if self.config.masks_on_gpu is True and "mask" in self.exclude_batch_keys_from_device:
+            self.exclude_batch_keys_from_device.remove("mask")
+        if self.config.images_on_gpu is True and "image" in self.exclude_batch_keys_from_device:
+            self.exclude_batch_keys_from_device.remove("image")
 
-    def setup_eval(self):
-        assert self.eval_dataset is not None
-        nerfstudio.utils.rich_utils.CONSOLE.print("Setting up evaluation dataset...")
+        if self.train_dataset and self.test_mode != "inference":
+            self.train_image_dataloader = nerfstudio.data.utils.dataloaders.CacheDataloader(
+                self.train_dataset,
+                num_images_to_sample_from=self.config.train_num_images_to_sample_from,
+                num_times_to_repeat_images=self.config.train_num_times_to_repeat_images,
+                device=self.device,
+                num_workers=self.world_size * 4,
+                pin_memory=True,
+                collate_fn=self.config.collate_fn,
+                exclude_batch_keys_from_device=self.train_dataset.exclude_batch_keys_from_device,
+            )
+            self.iter_train_image_dataloader = iter(self.train_image_dataloader)
+            self.train_pixel_sampler = self.config.pixel_sampler.setup(num_rays_per_batch=self.config.train_num_rays_per_batch)
+            self.train_ray_generator = nerfstudio.model_components.ray_generators.RayGenerator(self.train_dataset.cameras.to(self.device))
+        if self.eval_dataset and self.test_mode != "inference":
+            self.eval_image_dataloader = nerfstudio.data.utils.dataloaders.CacheDataloader(
+                self.eval_dataset,
+                num_images_to_sample_from=self.config.eval_num_images_to_sample_from,
+                num_times_to_repeat_images=self.config.eval_num_times_to_repeat_images,
+                device=self.device,
+                num_workers=self.world_size * 4,
+                pin_memory=True,
+                collate_fn=self.config.collate_fn,
+                exclude_batch_keys_from_device=self.exclude_batch_keys_from_device,
+            )
+            self.iter_eval_image_dataloader = iter(self.eval_image_dataloader)
+            self.eval_pixel_sampler = self.config.pixel_sampler.setup(num_rays_per_batch=self.config.eval_num_rays_per_batch)
+            self.eval_ray_generator = nerfstudio.model_components.ray_generators.RayGenerator(self.eval_dataset.cameras.to(self.device))
 
-    def next_train(self, step: int) -> typing.Tuple[typing.Union[nerfstudio.cameras.rays.RayBundle, nerfstudio.cameras.cameras.Cameras], typing.Dict]:
-        pass
+    def next_train(self, step: int = 0) -> typing.Tuple[typing.Union[nerfstudio.cameras.rays.RayBundle, nerfstudio.cameras.cameras.Cameras], typing.Dict]:
+        self.train_count += 1
+        image_batch = next(self.iter_train_image_dataloader)
+        batch = self.train_pixel_sampler.sample(image_batch)
+        ray_indices = batch["indices"]
+        ray_bundle = self.train_ray_generator(ray_indices)
+        return ray_bundle, batch
 
-    def next_eval(self, step: int) -> typing.Tuple[typing.Union[nerfstudio.cameras.rays.RayBundle, nerfstudio.cameras.cameras.Cameras], typing.Dict]:
-        pass
+    def next_eval(self, step: int = 0) -> typing.Tuple[typing.Union[nerfstudio.cameras.rays.RayBundle, nerfstudio.cameras.cameras.Cameras], typing.Dict]:
+        self.eval_count += 1
+        image_batch = next(self.iter_eval_image_dataloader)
+        batch = self.eval_pixel_sampler.sample(image_batch)
+        ray_indices = batch["indices"]
+        ray_bundle = self.eval_ray_generator(ray_indices)
+        return ray_bundle, batch
 
     def next_eval_image(self, step: int) -> typing.Tuple[nerfstudio.cameras.cameras.Cameras, typing.Dict]:
         pass
