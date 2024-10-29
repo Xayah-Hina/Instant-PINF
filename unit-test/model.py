@@ -11,24 +11,17 @@ import typing
 
 class PINFNeRFModelConfig(nerfstudio.models.base_model.ModelConfig):
     _target: typing.Type = dataclasses.field(default_factory=lambda: PINFNeRFModel)
+    num_coarse_samples: int = 64
+    num_importance_samples: int = 128
 
 
 class PINFNeRFModel(nerfstudio.models.base_model.Model):
+    config: PINFNeRFModelConfig
+
     def __init__(self, config: PINFNeRFModelConfig, scene_box: nerfstudio.data.scene_box.SceneBox, num_train_data: int):
+        super().__init__(config=config, scene_box=scene_box, num_train_data=num_train_data)
         self.field_coarse = None
         self.field_fine = None
-
-        super().__init__(config=config, scene_box=scene_box, num_train_data=num_train_data)
-
-    def populate_modules(self):
-        super().populate_modules()
-
-        position_encoding = nerfstudio.field_components.encodings.NeRFEncoding(
-            in_dim=3, num_frequencies=10, min_freq_exp=0.0, max_freq_exp=8.0, include_input=True
-        )
-        direction_encoding = nerfstudio.field_components.encodings.NeRFEncoding(
-            in_dim=3, num_frequencies=4, min_freq_exp=0.0, max_freq_exp=4.0, include_input=True
-        )
 
     def get_param_groups(self) -> typing.Dict[str, typing.List[torch.nn.Parameter]]:
         pass

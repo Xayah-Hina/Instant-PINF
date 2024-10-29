@@ -142,13 +142,15 @@ class PINFNeRFDataManager(nerfstudio.data.datamanagers.base_datamanager.DataMana
             config: PINFNeRFDataManagerConfig,
             device: torch.device,
             test_mode: typing.Literal["test", "val", "inference"] = "val",
+            world_size: int = 1,
+            local_rank: int = 0,
     ):
         super().__init__()
         self.config = config
         self.device = device
         self.test_mode = test_mode
-        self.world_size = 1
-        self.local_rank = 0
+        self.world_size = world_size
+        self.local_rank = local_rank
 
         self.dataparser: PINFDataParser = self.config.dataparser.setup()
         self.train_dataset = nerfstudio.data.datasets.base_dataset.InputDataset(dataparser_outputs=self.dataparser.get_dataparser_outputs(split="train"))
@@ -223,3 +225,12 @@ class PINFNeRFDataManager(nerfstudio.data.datamanagers.base_datamanager.DataMana
 
     def get_param_groups(self) -> typing.Dict[str, typing.List[torch.nn.Parameter]]:
         return {}
+
+    def forward(self):
+        pass
+
+    def setup_train(self):
+        pass
+
+    def setup_eval(self):
+        pass
