@@ -9,16 +9,16 @@ import dataclasses
 import typing
 
 
-class PINFNeRFModelConfig(nerfstudio.models.base_model.ModelConfig):
-    _target: typing.Type = dataclasses.field(default_factory=lambda: PINFNeRFModel)
+class HyFluidNeRFModelConfig(nerfstudio.models.base_model.ModelConfig):
+    _target: typing.Type = dataclasses.field(default_factory=lambda: HyFluidNeRFModel)
     num_coarse_samples: int = 64
     num_importance_samples: int = 128
 
 
-class PINFNeRFModel(nerfstudio.models.base_model.Model):
-    config: PINFNeRFModelConfig
+class HyFluidNeRFModel(nerfstudio.models.base_model.Model):
+    config: HyFluidNeRFModelConfig
 
-    def __init__(self, config: PINFNeRFModelConfig, scene_box: nerfstudio.data.scene_box.SceneBox, num_train_data: int):
+    def __init__(self, config: HyFluidNeRFModelConfig, scene_box: nerfstudio.data.scene_box.SceneBox, num_train_data: int):
         super().__init__(config=config, scene_box=scene_box, num_train_data=num_train_data)
         self.field_coarse = None
         self.field_fine = None

@@ -12,16 +12,16 @@ import typing
 import pathlib
 
 
-class PINFNeRFPipelineConfig(nerfstudio.configs.base_config.InstantiateConfig):
-    _target: typing.Type = dataclasses.field(default_factory=lambda: PINFNeRFPipeline)
+class HyFluidNeRFPipelineConfig(nerfstudio.configs.base_config.InstantiateConfig):
+    _target: typing.Type = dataclasses.field(default_factory=lambda: HyFluidNeRFPipeline)
     datamanager: nerfstudio.data.datamanagers.base_datamanager.DataManagerConfig = dataclasses.field(default_factory=nerfstudio.data.datamanagers.base_datamanager.DataManagerConfig)
     model: nerfstudio.models.base_model.ModelConfig = dataclasses.field(default_factory=nerfstudio.models.base_model.ModelConfig)
 
 
-class PINFNeRFPipeline(nerfstudio.pipelines.base_pipeline.Pipeline):
+class HyFluidNeRFPipeline(nerfstudio.pipelines.base_pipeline.Pipeline):
     def __init__(
             self,
-            config: PINFNeRFPipelineConfig,
+            config: HyFluidNeRFPipelineConfig,
             device: str,
             test_mode: typing.Literal["test", "val", "inference"] = "val",
             world_size: int = 1,

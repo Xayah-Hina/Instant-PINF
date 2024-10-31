@@ -23,8 +23,8 @@ import os
 
 
 @dataclasses.dataclass
-class PINFDataParserConfig(nerfstudio.data.dataparsers.base_dataparser.DataParserConfig):
-    _target: typing.Type = dataclasses.field(default_factory=lambda: PINFDataParser)
+class HyFluidDataParserConfig(nerfstudio.data.dataparsers.base_dataparser.DataParserConfig):
+    _target: typing.Type = dataclasses.field(default_factory=lambda: HyFluidDataParser)
     data: pathlib.Path = pathlib.Path("data/ScalarReal")
     scale_factor: float = 1.0
     alpha_color: typing.Optional[str] = "white"
@@ -32,10 +32,10 @@ class PINFDataParserConfig(nerfstudio.data.dataparsers.base_dataparser.DataParse
 
 
 @dataclasses.dataclass
-class PINFDataParser(nerfstudio.data.dataparsers.base_dataparser.DataParser):
-    config: PINFDataParserConfig
+class HyFluidDataParser(nerfstudio.data.dataparsers.base_dataparser.DataParser):
+    config: HyFluidDataParserConfig
 
-    def __init__(self, config: PINFDataParserConfig):
+    def __init__(self, config: HyFluidDataParserConfig):
         super().__init__(config=config)
         if config.alpha_color is not None:
             self.alpha_color_tensor = nerfstudio.utils.colors.get_color(config.alpha_color)
@@ -117,9 +117,9 @@ class PINFDataParser(nerfstudio.data.dataparsers.base_dataparser.DataParser):
 
 
 @dataclasses.dataclass
-class PINFNeRFDataManagerConfig(nerfstudio.data.datamanagers.base_datamanager.DataManagerConfig):
-    _target: typing.Type = dataclasses.field(default_factory=lambda: PINFNeRFDataManager)
-    dataparser: PINFDataParserConfig = dataclasses.field(default_factory=PINFDataParserConfig)
+class HyFluidNeRFDataManagerConfig(nerfstudio.data.datamanagers.base_datamanager.DataManagerConfig):
+    _target: typing.Type = dataclasses.field(default_factory=lambda: HyFluidNeRFDataManager)
+    dataparser: HyFluidDataParserConfig = dataclasses.field(default_factory=HyFluidDataParserConfig)
     train_num_rays_per_batch: int = 1024
     eval_num_rays_per_batch: int = 1024
     train_num_images_to_sample_from: int = -1
@@ -130,8 +130,8 @@ class PINFNeRFDataManagerConfig(nerfstudio.data.datamanagers.base_datamanager.Da
     pixel_sampler: nerfstudio.data.pixel_samplers.PixelSamplerConfig = dataclasses.field(default_factory=nerfstudio.data.pixel_samplers.PixelSamplerConfig)
 
 
-class PINFNeRFDataManager(nerfstudio.data.datamanagers.base_datamanager.DataManager):
-    config: PINFNeRFDataManagerConfig
+class HyFluidNeRFDataManager(nerfstudio.data.datamanagers.base_datamanager.DataManager):
+    config: HyFluidNeRFDataManagerConfig
     train_dataset: nerfstudio.data.datasets.base_dataset.InputDataset
     eval_dataset: nerfstudio.data.datasets.base_dataset.InputDataset
     train_pixel_sampler: nerfstudio.data.pixel_samplers.PixelSampler
@@ -139,7 +139,7 @@ class PINFNeRFDataManager(nerfstudio.data.datamanagers.base_datamanager.DataMana
 
     def __init__(
             self,
-            config: PINFNeRFDataManagerConfig,
+            config: HyFluidNeRFDataManagerConfig,
             device: torch.device,
             test_mode: typing.Literal["test", "val", "inference"] = "val",
             world_size: int = 1,
@@ -152,7 +152,7 @@ class PINFNeRFDataManager(nerfstudio.data.datamanagers.base_datamanager.DataMana
         self.world_size = world_size
         self.local_rank = local_rank
 
-        self.dataparser: PINFDataParser = self.config.dataparser.setup()
+        self.dataparser: HyFluidDataParser = self.config.dataparser.setup()
         self.train_dataset = nerfstudio.data.datasets.base_dataset.InputDataset(dataparser_outputs=self.dataparser.get_dataparser_outputs(split="train"))
         self.eval_dataset = nerfstudio.data.datasets.base_dataset.InputDataset(dataparser_outputs=self.dataparser.get_dataparser_outputs(split="test"))
 
