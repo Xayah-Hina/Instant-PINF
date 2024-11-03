@@ -7,6 +7,7 @@ import nerfstudio.field_components.encodings
 import torch
 import dataclasses
 import typing
+import jaxtyping
 
 
 class HyFluidNeRFModelConfig(nerfstudio.models.base_model.ModelConfig):
@@ -33,4 +34,17 @@ class HyFluidNeRFModel(nerfstudio.models.base_model.Model):
         pass
 
     def get_image_metrics_and_images(self, outputs: typing.Dict[str, torch.Tensor], batch: typing.Dict[str, torch.Tensor]) -> typing.Tuple[typing.Dict[str, float], typing.Dict[str, torch.Tensor]]:
+        pass
+
+
+class HashEncodingWithTime(nerfstudio.field_components.encodings.Encoding):
+
+    def __init__(self, in_dim: int) -> None:
+        super().__init__(in_dim)
+
+    def forward(self, in_tensor: jaxtyping.Shaped[torch.Tensor, "*bs input_dim"]) -> jaxtyping.Shaped[torch.Tensor, "*bs output_dim"]:
+        pass
+
+    @classmethod
+    def get_tcnn_encoding_config(cls) -> dict:
         pass
