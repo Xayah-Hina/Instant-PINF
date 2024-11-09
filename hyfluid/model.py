@@ -7,7 +7,8 @@ import nerfstudio.field_components.encodings
 import torch
 import dataclasses
 import typing
-import jaxtyping
+
+import encoder
 
 
 class HyFluidNeRFModelConfig(nerfstudio.models.base_model.ModelConfig):
@@ -25,7 +26,11 @@ class HyFluidNeRFModel(nerfstudio.models.base_model.Model):
         self.field_fine = None
 
     def get_param_groups(self) -> typing.Dict[str, typing.List[torch.nn.Parameter]]:
-        pass
+        param_groups = {}
+        assert self.field_coarse is not None
+        assert self.field_fine is not None
+        param_groups["fields"] = list(self.field_coarse.parameters()) + list(self.field_fine.parameters())
+        return param_groups
 
     def get_outputs(self, ray_bundle: typing.Union[nerfstudio.cameras.rays.RayBundle, nerfstudio.cameras.cameras.Cameras]) -> typing.Dict[str, typing.Union[torch.Tensor, typing.List]]:
         pass
