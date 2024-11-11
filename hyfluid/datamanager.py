@@ -22,53 +22,6 @@ import typing
 import os
 
 
-# def perturb_frames(image_batch, all_frames):
-#     # 计算每个视频的开始和结束帧索引
-#     video_starts = [0] + list(torch.cumsum(torch.tensor(all_frames[:-1]), dim=0).numpy())
-#     video_ends = [start + frames - 1 for start, frames in zip(video_starts, all_frames)]
-#
-#     images = image_batch['image']
-#     image_idx = image_batch['image_idx'].float()
-#     num_frames = images.shape[0]
-#
-#     # 克隆图像和索引以便于扰动
-#     perturbed_images = images.clone()
-#     perturbed_idx = image_idx.clone()
-#
-#     for i in range(num_frames):
-#         # 当前帧的索引
-#         current_frame_idx = int(image_idx[i].item())
-#
-#         # 检查是否为视频的第一个或最后一个帧
-#         is_first_or_last_frame = any(
-#             current_frame_idx == video_starts[j] or current_frame_idx == video_ends[j]
-#             for j in range(len(all_frames))
-#         )
-#         if is_first_or_last_frame:
-#             continue
-#
-#         # 随机生成扰动值
-#         perturb_value = (torch.rand(1).item() - 0.5)
-#
-#         if perturb_value > 0:
-#             # 获取下一帧的索引
-#             next_frame_idx = torch.where(image_idx == (current_frame_idx + 1))[0].item()
-#             weight_curr = (0.5 - perturb_value) / 0.5
-#             weight_next = perturb_value / 0.5
-#             perturbed_images[i] = weight_curr * images[i] + weight_next * images[next_frame_idx]
-#             perturbed_idx[i] = image_idx[i] + perturb_value
-#
-#         elif perturb_value < 0:
-#             # 获取前一帧的索引
-#             prev_frame_idx = torch.where(image_idx == (current_frame_idx - 1))[0].item()
-#             weight_curr = (0.5 + perturb_value) / 0.5
-#             weight_prev = -perturb_value / 0.5
-#             perturbed_images[i] = weight_curr * images[i] + weight_prev * images[prev_frame_idx]
-#             perturbed_idx[i] = image_idx[i] + perturb_value
-#
-#     return perturbed_images, perturbed_idx
-
-
 def perturb_frames_sample(image_batch, all_frames, batch):
     sample_image = batch['image']
     sample_idx = batch['indices'].float()

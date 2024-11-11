@@ -260,6 +260,7 @@ class HashEncoderHyFluid(torch.nn.Module):
         self.input_fields_grad = ti.field(dtype=ti.f32, shape=(max_num_queries, 4), needs_grad=True)
 
         self.num_scales = num_scales
+        self.features_per_level = features_per_level
         ####################################################################################################
 
         self.register_buffer('hash_grad', torch.zeros(total_hash_size, dtype=torch.float32), persistent=False)
