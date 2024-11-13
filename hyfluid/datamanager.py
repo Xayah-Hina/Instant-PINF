@@ -22,6 +22,18 @@ import typing
 import os
 
 
+def image_idx_to_frame(image_indices, all_frames):
+    cumulative_frames = torch.cumsum(torch.tensor([0] + all_frames[:-1]), dim=0)
+    result = []
+    for image_idx in image_indices:
+        # 确定属于哪个视频
+        video_idx = torch.searchsorted(cumulative_frames, image_idx, right=True) - 1
+        # 计算在视频内的帧序号（保持浮点数）
+        frame_in_video = image_idx - cumulative_frames[video_idx]
+        result.append(frame_in_video.item())
+    return torch.tensor(result)
+
+
 def perturb_frames_sample(image_batch, all_frames, batch):
     sample_image = batch['image']
     sample_idx = batch['indices'].float()

@@ -1,5 +1,3 @@
-from typing import Optional, Dict, Tuple
-
 import nerfstudio.models.base_model
 import nerfstudio.cameras.cameras
 import nerfstudio.cameras.rays
