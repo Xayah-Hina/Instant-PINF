@@ -78,7 +78,7 @@ def load_train_data(dataset_dir: pathlib.Path, split: typing.Literal["train", "v
         cx=torch.from_numpy(cx),
         cy=torch.from_numpy(cy),
         camera_type=nerfstudio.cameras.cameras.CameraType.PERSPECTIVE,
-    )
+    ).to(device)
 
     scene_box = nerfstudio.data.scene_box.SceneBox(aabb=torch.tensor([[-1.5, -1.5, -1.5], [1.5, 1.5, 1.5]], dtype=torch.float32))
     metadata = {'all_frames': all_frames}
@@ -104,8 +104,19 @@ def load_train_data(dataset_dir: pathlib.Path, split: typing.Literal["train", "v
     return dataloader
 
 
+def create_test(dataset: nerfstudio.data.datasets.base_dataset.InputDataset, device: torch.device):
+    dataloader = nerfstudio.data.utils.dataloaders.FixedIndicesEvalDataloader(input_dataset=dataset, device=device)
+    camera, batch = next(dataloader)
+    camera_ray_bundle = camera.generate_rays(camera_indices=0, keep_shape=True)
+    image_height, image_width = camera_ray_bundle.origins.shape[:2]
+    num_rays = len(camera_ray_bundle)
+
+    print(f'Number of rays: {num_rays}')
+
+
 if __name__ == '__main__':
     import time
+
     start_time = time.time()
     dataloader = load_train_data(pathlib.Path("C:/Users/imeho/Documents/DataSets/InstantPINF/ScalarReal"), "train", device=torch.device("cuda"))
     end_time = time.time()
