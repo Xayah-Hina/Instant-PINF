@@ -15,7 +15,13 @@ import pathlib
 import os
 
 
-def load_train_data(dataset_dir: pathlib.Path, split: typing.Literal["train", "val", "test"], device: torch.device, frame_skip: int = 1):
+def load_train_data(
+        dataset_dir: pathlib.Path,
+        split: typing.Literal["train", "val", "test"],
+        device: torch.device,
+        frame_skip: int = 1,
+        exclude_batch_keys_from_device=None,
+):
     image_filenames = []
     all_images = []
     all_poses = []
@@ -82,7 +88,7 @@ def load_train_data(dataset_dir: pathlib.Path, split: typing.Literal["train", "v
 
     scene_box = nerfstudio.data.scene_box.SceneBox(aabb=torch.tensor([[-1.5, -1.5, -1.5], [1.5, 1.5, 1.5]], dtype=torch.float32))
     metadata = {'all_frames': all_frames}
-    alpha_color_tensor = nerfstudio.utils.colors.get_color("white")
+    alpha_color_tensor = nerfstudio.utils.colors.get_color("black")
     dataparser_outputs = nerfstudio.data.dataparsers.base_dataparser.DataparserOutputs(
         image_filenames=image_filenames,
         cameras=cameras,
@@ -98,7 +104,7 @@ def load_train_data(dataset_dir: pathlib.Path, split: typing.Literal["train", "v
         device=device,
         num_workers=16,
         collate_fn=nerfstudio.data.utils.nerfstudio_collate.nerfstudio_collate,
-        exclude_batch_keys_from_device=[],
+        exclude_batch_keys_from_device=exclude_batch_keys_from_device,
     )
 
     return dataloader
