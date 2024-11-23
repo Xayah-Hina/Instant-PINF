@@ -13,9 +13,12 @@ import nerfstudio.model_components.losses
 
 import pathlib
 import time
-import matplotlib.pyplot as plt
 import tqdm
 from collections import defaultdict
+
+import nerfstudio.data.utils.dataloaders
+
+device = torch.device("cuda")
 
 
 def interpolate_frame(in_image_batch, boundary_frames, in_batch):
@@ -44,11 +47,10 @@ def interpolate_frame(in_image_batch, boundary_frames, in_batch):
     return interpolated_pixels, interpolated_indices
 
 
-if __name__ == '__main__':
+def train():
     #### Setup Datasets
-    device = torch.device("cuda")
     dataloader = src.dataloader.load_train_data(
-        dataset_dir=pathlib.Path("C:/Users/imeho/Documents/DataSets/InstantPINF/ScalarReal"),
+        dataset_dir=pathlib.Path("C:/Users/Stolas/Desktop/xiang/Datasets/ScalarReal"),
         split="train",
         device=torch.device("cuda"),
         frame_skip=1,
@@ -156,8 +158,9 @@ if __name__ == '__main__':
         dists = ray_samples_uniform.deltas
         rgb = torch.ones(3, device=device) * (0.6 + torch.tanh(learned_rgb) * 0.4)
         alpha = raw2alpha(raw[..., -1], dists[..., -1])
-        weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1), device=device), 1. - alpha + 1e-10], -1),
-                                        -1)[:, :-1]
+        weights = alpha * torch.cumprod(
+            torch.cat([torch.ones((alpha.shape[0], 1), device=device), 1. - alpha + 1e-10], -1),
+            -1)[:, :-1]
         rgb_map = torch.sum(weights[..., None] * rgb, -2)
         execution_times["raw2alpha"].append(time.time() - start)
 
@@ -174,32 +177,40 @@ if __name__ == '__main__':
         # 记录 loss 值
         loss_values.append(loss.item())
 
-    # 计算平均耗时并排序
-    avg_execution_times = {key: sum(times) / len(times) for key, times in execution_times.items()}
-    sorted_avg_times = sorted(avg_execution_times.items(), key=lambda x: x[1], reverse=True)
+    del image_batch["image"]
+    torch.cuda.empty_cache()
+    eval_dataloader = nerfstudio.data.utils.dataloaders.RandIndicesEvalDataloader(input_dataset=dataloader.dataset)
+    camera, batch = next(eval_dataloader)
+    camera = camera.to(device)
+    # batch['image'] = batch['image'].to(device)
+    camera_ray_bundle = near_far_collider(camera.generate_rays(camera_indices=0, keep_shape=True))
+    num_rays = len(camera_ray_bundle)
+    res = []
+    for i in range(0, num_rays, 1024):
+        start_idx = i
+        end_idx = i + 4096
+        ray_bundle = camera_ray_bundle.get_row_major_sliced_ray_bundle(start_idx, end_idx)
+        camera_ray_samples_uniform = uniform_sampler(ray_bundle.flatten())
+        camera_positions = camera_ray_samples_uniform.frustums.get_positions()
+        shape = list(camera_positions.shape)
+        shape[-1] = 1
+        camera_frames_expanded = torch.full(shape, batch['image_idx'], device=device)
+        camera_xyzt = torch.cat((camera_positions, camera_frames_expanded), dim=-1)
+        camera_xyzt_flat = camera_xyzt.reshape(-1, 4)
+        camera_xyzt_encoded = xyzt_encoder(camera_xyzt_flat)
+        camera_raw_flat = mlp(camera_xyzt_encoded)
+        camera_raw = camera_raw_flat.reshape(camera_xyzt.shape[0], camera_xyzt.shape[1], camera_raw_flat.shape[-1])
+        camera_dists = camera_ray_samples_uniform.deltas
+        camera_rgb = torch.ones(3, device=device) * (0.6 + torch.tanh(learned_rgb) * 0.4)
+        camera_alpha = raw2alpha(camera_raw[..., -1], camera_dists[..., -1])
+        camera_weights = camera_alpha * torch.cumprod(
+            torch.cat([torch.ones((camera_alpha.shape[0], 1), device=device), 1. - camera_alpha + 1e-10], -1),
+            -1)[:, :-1]
+        camera_rgb_map = torch.sum(camera_weights[..., None] * camera_rgb, -2)
+        res.append(camera_rgb_map.to(torch.device("cpu")))
+    result = torch.cat(res, dim=-1)
+    print(result.shape)
 
-    # 获取平均耗时 Top 5 的步骤
-    top5_keys = [item[0] for item in sorted_avg_times[:5]]
 
-    # 绘制折线图
-    plt.figure(figsize=(12, 8))
-    for key in top5_keys:
-        plt.plot(range(1, len(execution_times[key]) + 1), execution_times[key], label=key, marker='o')
-
-    # 设置图表标题和轴标签
-    plt.title("Top 5 Execution Times per Step", fontsize=14)
-    plt.xlabel("Iteration", fontsize=12)
-    plt.ylabel("Time (seconds)", fontsize=12)
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
-    # 绘制 loss 曲线
-    plt.figure(figsize=(12, 8))
-    plt.plot(range(1, len(loss_values) + 1), loss_values, label="Loss", color="red", marker='o')
-    plt.title("Loss Curve", fontsize=14)
-    plt.xlabel("Iteration", fontsize=12)
-    plt.ylabel("Loss", fontsize=12)
-    plt.legend()
-    plt.grid(True)
-    plt.show()
+if __name__ == '__main__':
+    train()
