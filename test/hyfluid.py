@@ -1,4 +1,5 @@
 import torch
+import taichi as ti
 import numpy as np
 import imageio.v2 as imageio
 import math
@@ -574,10 +575,10 @@ def render_rays(ray_batch,
     return ret
 
 
-def train():
-    args_npz = np.load("args.npz", allow_pickle=True)
-
+if __name__ == '__main__':
+    ti.init(arch=ti.cuda, device_memory_GB=36.0)
     from types import SimpleNamespace
+    args_npz = np.load("args.npz", allow_pickle=True)
     args = SimpleNamespace(**{
         key: value.item() if isinstance(value, np.ndarray) and value.size == 1 else
         value.tolist() if isinstance(value, np.ndarray) else
@@ -831,11 +832,3 @@ def train():
             ray_idxs = torch.randperm(rays.shape[0])
             i_batch = 0
             resample_rays = False
-
-
-if __name__ == '__main__':
-    import taichi as ti
-
-    ti.init(arch=ti.cuda, device_memory_GB=36.0)
-    torch.set_default_tensor_type('torch.cuda.FloatTensor')
-    train()
