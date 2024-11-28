@@ -773,20 +773,11 @@ def train():
         new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
         for param_group in optimizer.param_groups:
             param_group['lr'] = new_lrate
+        global_step += 1
         ################################
 
         # Rest is logging
         os.makedirs(os.path.join(basedir, expname), exist_ok=True)
-        if i % args.i_weights == 0:
-            path = os.path.join(basedir, expname, '{:06d}.tar'.format(i))
-            torch.save({
-                'global_step': global_step,
-                'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
-                'embed_fn_state_dict': render_kwargs_train['embed_fn'].state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-            }, path)
-            print('Saved checkpoints at', path)
-
         if i % args.i_video == 0 and i > 0:
             # Turn on testing mode
             testsavedir = os.path.join(basedir, expname, 'spiral_{:06d}'.format(i))
@@ -840,7 +831,6 @@ def train():
             ray_idxs = torch.randperm(rays.shape[0])
             i_batch = 0
             resample_rays = False
-        global_step += 1
 
 
 if __name__ == '__main__':
