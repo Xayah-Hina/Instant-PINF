@@ -669,31 +669,6 @@ def train():
     basedir = args.basedir
     expname = args.expname
 
-    ##########################
-
-    # Load checkpoints
-    if args.ft_path is not None and args.ft_path != 'None':
-        ckpts = [args.ft_path]
-    else:
-        ckpts = [os.path.join(basedir, expname, f) for f in sorted(os.listdir(os.path.join(basedir, expname))) if
-                 'tar' in f]
-
-    print('Found ckpts', ckpts)
-    if len(ckpts) > 0 and not args.no_reload:
-        ckpt_path = ckpts[-1]
-        print('Reloading from', ckpt_path)
-        ckpt = torch.load(ckpt_path)
-
-        start = ckpt['global_step']
-        # Load model
-        model.load_state_dict(ckpt['network_fn_state_dict'])
-        embed_fn.load_state_dict(ckpt['embed_fn_state_dict'])
-        # Load optimizer
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-
-    ##########################
-    # pdb.set_trace()
-
     render_kwargs_train = {
         'network_query_fn': network_query_fn,
         'perturb': args.perturb,
@@ -874,12 +849,6 @@ def train():
 if __name__ == '__main__':
     import taichi as ti
 
-    ti.init(arch=ti.cuda, device_memory_GB=6.0)
+    ti.init(arch=ti.cuda, device_memory_GB=36.0)
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
-    import ipdb
-
-    try:
-        train()
-    except Exception as e:
-        print(e)
-        ipdb.post_mortem()
+    train()
