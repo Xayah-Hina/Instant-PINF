@@ -210,45 +210,6 @@ class BBox_Tool(object):
 
 
 ##########################
-trans_t = lambda t: torch.Tensor([
-    [1, 0, 0, 0],
-    [0, 1, 0, 0],
-    [0, 0, 1, t],
-    [0, 0, 0, 1]]).float()
-
-rot_phi = lambda phi: torch.Tensor([
-    [1, 0, 0, 0],
-    [0, np.cos(phi), -np.sin(phi), 0],
-    [0, np.sin(phi), np.cos(phi), 0],
-    [0, 0, 0, 1]]).float()
-
-rot_theta = lambda th: torch.Tensor([
-    [np.cos(th), 0, -np.sin(th), 0],
-    [0, 1, 0, 0],
-    [np.sin(th), 0, np.cos(th), 0],
-    [0, 0, 0, 1]]).float()
-
-
-def pose_spherical(theta, phi, radius, rotZ=True, wx=0.0, wy=0.0, wz=0.0):
-    # spherical, rotZ=True: theta rotate around Z; rotZ=False: theta rotate around Y
-    # wx,wy,wz, additional translation, normally the center coord.
-    c2w = trans_t(radius)
-    c2w = rot_phi(phi / 180. * np.pi) @ c2w
-    c2w = rot_theta(theta / 180. * np.pi) @ c2w
-    if rotZ:  # swap yz, and keep right-hand
-        c2w = torch.Tensor(np.array([[-1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]])) @ c2w
-
-    ct = torch.Tensor([
-        [1, 0, 0, wx],
-        [0, 1, 0, wy],
-        [0, 0, 1, wz],
-        [0, 0, 0, 1]]).float()
-    c2w = ct @ c2w
-
-    return c2w
-
-
-##########################
 # Ray helpers
 def get_rays(H, W, K, c2w):
     i, j = torch.meshgrid(torch.linspace(0, W - 1, W), torch.linspace(0, H - 1, H),
@@ -358,6 +319,7 @@ class RAdam(Optimizer):
                     p.data.copy_(p_data_fp32)
 
         return loss
+
 
 ##########################
 
@@ -693,78 +655,16 @@ def render_rays(ray_batch,
     return ret
 
 
-def config_parser():
-    import configargparse
-    parser = configargparse.ArgumentParser()
-    parser.add_argument('--config', is_config_file=True,
-                        help='config file path')
-    parser.add_argument("--expname", type=str,
-                        help='experiment name')
-    parser.add_argument("--basedir", type=str, default='./logs/',
-                        help='where to store ckpts and logs')
-    parser.add_argument("--datadir", type=str, default='./data/llff/fern',
-                        help='input data directory')
-
-    # training options
-    parser.add_argument("--encoder", type=str, default='ingp',
-                        choices=['ingp', 'plane'])
-    parser.add_argument("--N_rand", type=int, default=32 * 32 * 4,
-                        help='batch size (number of random rays per gradient step)')
-    parser.add_argument("--N_time", type=int, default=1,
-                        help='batch size in time')
-    parser.add_argument("--lrate", type=float, default=5e-4,
-                        help='learning rate')
-    parser.add_argument("--lrate_decay", type=int, default=250,
-                        help='exponential learning rate decay')
-    parser.add_argument("--N_iters", type=int, default=50000)
-    parser.add_argument("--no_reload", action='store_true',
-                        help='do not reload weights from saved ckpt')
-    parser.add_argument("--ft_path", type=str, default=None,
-                        help='specific weights npy file to reload for coarse network')
-
-    # rendering options
-    parser.add_argument("--N_samples", type=int, default=64,
-                        help='number of coarse samples per ray')
-    parser.add_argument("--perturb", type=float, default=1.,
-                        help='set to 0. for no jitter, 1. for jitter')
-
-    parser.add_argument("--render_only", action='store_true',
-                        help='do not optimize, reload weights and render out render_poses path')
-    parser.add_argument("--half_res", action='store_true',
-                        help='load at half resolution')
-
-    # logging/saving options
-    parser.add_argument("--i_print", type=int, default=100,
-                        help='frequency of console printout and metric loggin')
-    parser.add_argument("--i_weights", type=int, default=10000,
-                        help='frequency of weight ckpt saving')
-    parser.add_argument("--i_video", type=int, default=9999999,
-                        help='frequency of render_poses video saving')
-
-    parser.add_argument("--finest_resolution", type=int, default=512,
-                        help='finest resolultion for hashed embedding')
-    parser.add_argument("--finest_resolution_t", type=int, default=512,
-                        help='finest resolultion for hashed embedding')
-    parser.add_argument("--num_levels", type=int, default=16,
-                        help='number of levels for hashed embedding')
-    parser.add_argument("--base_resolution", type=int, default=16,
-                        help='base resolution for hashed embedding')
-    parser.add_argument("--base_resolution_t", type=int, default=16,
-                        help='base resolution for hashed embedding')
-    parser.add_argument("--log2_hashmap_size", type=int, default=19,
-                        help='log2 of hashmap size')
-    parser.add_argument("--feats_dim", type=int, default=36,
-                        help='feature dimension of kplanes')
-    parser.add_argument("--tv-loss-weight", type=float, default=1e-6,
-                        help='learning rate')
-
-    return parser
-
-
 def train():
-    parser = config_parser()
-    args = parser.parse_args()
+    args_npz = np.load("args.npz", allow_pickle=True)
 
+    from types import SimpleNamespace
+    args = SimpleNamespace(**{
+        key: value.item() if isinstance(value, np.ndarray) and value.size == 1 else
+        value.tolist() if isinstance(value, np.ndarray) else
+        value
+        for key, value in args_npz.items()
+    })
 
     pinf_data = np.load("train_dataset.npz")
     images_train_ = pinf_data['images_train']
@@ -787,7 +687,6 @@ def train():
     voxel_scale = pinf_data_test['voxel_scale']
     near = pinf_data_test['near'].item()
     far = pinf_data_test['far'].item()
-
 
     global bbox_model
     voxel_tran_inv = np.linalg.inv(voxel_tran)
