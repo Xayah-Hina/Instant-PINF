@@ -469,87 +469,6 @@ def render_path(render_poses, hwf, K, render_kwargs, gt_imgs=None, savedir=None,
     return rgbs, depths
 
 
-def create_nerf(args):
-    """Instantiate NeRF's MLP model.
-    """
-    from encoder import HashEncoderHyFluid
-    if args.encoder == 'ingp':
-        max_res = np.array(
-            [args.finest_resolution, args.finest_resolution, args.finest_resolution, args.finest_resolution_t])
-        min_res = np.array([args.base_resolution, args.base_resolution, args.base_resolution, args.base_resolution_t])
-
-        # embed_fn = Hash4Encoder(max_res=max_res, min_res=min_res, num_scales=args.num_levels,
-        #                         max_params=2 ** args.log2_hashmap_size)
-        embed_fn = HashEncoderHyFluid(min_res=min_res, max_res=max_res, num_scales=args.num_levels, max_params=2 ** args.log2_hashmap_size)
-        input_ch = embed_fn.num_scales * 2  # default 2 params per scale
-        embedding_params = list(embed_fn.parameters())
-    else:
-        raise NotImplementedError
-
-    model = NeRFSmall(num_layers=2,
-                      hidden_dim=64,
-                      geo_feat_dim=15,
-                      num_layers_color=2,
-                      hidden_dim_color=16,
-                      input_ch=input_ch).to(device)
-    print(model)
-    print('Total number of trainable parameters in model: {}'.format(
-        sum([p.numel() for p in model.parameters() if p.requires_grad])))
-    print('Total number of parameters in embedding: {}'.format(
-        sum([p.numel() for p in embedding_params if p.requires_grad])))
-    grad_vars = list(model.parameters())
-
-    network_query_fn = lambda x: model(embed_fn(x))
-
-    # Create optimizer
-    optimizer = RAdam([
-        {'params': grad_vars, 'weight_decay': 1e-6},
-        {'params': embedding_params, 'eps': 1e-15}
-    ], lr=args.lrate, betas=(0.9, 0.99))
-    grad_vars += list(embedding_params)
-    start = 0
-    basedir = args.basedir
-    expname = args.expname
-
-    ##########################
-
-    # Load checkpoints
-    if args.ft_path is not None and args.ft_path != 'None':
-        ckpts = [args.ft_path]
-    else:
-        ckpts = [os.path.join(basedir, expname, f) for f in sorted(os.listdir(os.path.join(basedir, expname))) if
-                 'tar' in f]
-
-    print('Found ckpts', ckpts)
-    if len(ckpts) > 0 and not args.no_reload:
-        ckpt_path = ckpts[-1]
-        print('Reloading from', ckpt_path)
-        ckpt = torch.load(ckpt_path)
-
-        start = ckpt['global_step']
-        # Load model
-        model.load_state_dict(ckpt['network_fn_state_dict'])
-        embed_fn.load_state_dict(ckpt['embed_fn_state_dict'])
-        # Load optimizer
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-
-    ##########################
-    # pdb.set_trace()
-
-    render_kwargs_train = {
-        'network_query_fn': network_query_fn,
-        'perturb': args.perturb,
-        'N_samples': args.N_samples,
-        'network_fn': model,
-        'embed_fn': embed_fn,
-    }
-
-    render_kwargs_test = {k: render_kwargs_train[k] for k in render_kwargs_train}
-    render_kwargs_test['perturb'] = False
-
-    return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
-
-
 def raw2outputs(raw, z_vals, rays_d, learned_rgb=None):
     """Transforms model's predictions to semantically meaningful values.
     Args:
@@ -709,19 +628,84 @@ def train():
     basedir = args.basedir
     expname = args.expname
 
-    os.makedirs(os.path.join(basedir, expname), exist_ok=True)
-    f = os.path.join(basedir, expname, 'args.txt')
-    with open(f, 'w') as file:
-        for arg in sorted(vars(args)):
-            attr = getattr(args, arg)
-            file.write('{} = {}\n'.format(arg, attr))
-    if args.config is not None:
-        f = os.path.join(basedir, expname, 'config.txt')
-        with open(f, 'w') as file:
-            file.write(open(args.config, 'r').read())
-
     # Create nerf model
-    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
+    ############################
+    from encoder import HashEncoderHyFluid
+    if args.encoder == 'ingp':
+        max_res = np.array(
+            [args.finest_resolution, args.finest_resolution, args.finest_resolution, args.finest_resolution_t])
+        min_res = np.array([args.base_resolution, args.base_resolution, args.base_resolution, args.base_resolution_t])
+
+        # embed_fn = Hash4Encoder(max_res=max_res, min_res=min_res, num_scales=args.num_levels,
+        #                         max_params=2 ** args.log2_hashmap_size)
+        embed_fn = HashEncoderHyFluid(min_res=min_res, max_res=max_res, num_scales=args.num_levels, max_params=2 ** args.log2_hashmap_size)
+        input_ch = embed_fn.num_scales * 2  # default 2 params per scale
+        embedding_params = list(embed_fn.parameters())
+    else:
+        raise NotImplementedError
+
+    model = NeRFSmall(num_layers=2,
+                      hidden_dim=64,
+                      geo_feat_dim=15,
+                      num_layers_color=2,
+                      hidden_dim_color=16,
+                      input_ch=input_ch).to(device)
+    print(model)
+    print('Total number of trainable parameters in model: {}'.format(
+        sum([p.numel() for p in model.parameters() if p.requires_grad])))
+    print('Total number of parameters in embedding: {}'.format(
+        sum([p.numel() for p in embedding_params if p.requires_grad])))
+    grad_vars = list(model.parameters())
+
+    network_query_fn = lambda x: model(embed_fn(x))
+
+    # Create optimizer
+    optimizer = RAdam([
+        {'params': grad_vars, 'weight_decay': 1e-6},
+        {'params': embedding_params, 'eps': 1e-15}
+    ], lr=args.lrate, betas=(0.9, 0.99))
+    grad_vars += list(embedding_params)
+    start = 0
+    basedir = args.basedir
+    expname = args.expname
+
+    ##########################
+
+    # Load checkpoints
+    if args.ft_path is not None and args.ft_path != 'None':
+        ckpts = [args.ft_path]
+    else:
+        ckpts = [os.path.join(basedir, expname, f) for f in sorted(os.listdir(os.path.join(basedir, expname))) if
+                 'tar' in f]
+
+    print('Found ckpts', ckpts)
+    if len(ckpts) > 0 and not args.no_reload:
+        ckpt_path = ckpts[-1]
+        print('Reloading from', ckpt_path)
+        ckpt = torch.load(ckpt_path)
+
+        start = ckpt['global_step']
+        # Load model
+        model.load_state_dict(ckpt['network_fn_state_dict'])
+        embed_fn.load_state_dict(ckpt['embed_fn_state_dict'])
+        # Load optimizer
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+
+    ##########################
+    # pdb.set_trace()
+
+    render_kwargs_train = {
+        'network_query_fn': network_query_fn,
+        'perturb': args.perturb,
+        'N_samples': args.N_samples,
+        'network_fn': model,
+        'embed_fn': embed_fn,
+    }
+
+    render_kwargs_test = {k: render_kwargs_train[k] for k in render_kwargs_train}
+    render_kwargs_test['perturb'] = False
+
+    ############################
     global_step = start
 
     bds_dict = {
@@ -733,24 +717,6 @@ def train():
 
     # Move testing data to GPU
     render_poses = torch.Tensor(render_poses).to(device)
-
-    # Short circuit if only rendering out from trained model
-    if args.render_only:
-        print('RENDER ONLY')
-        with torch.no_grad():
-            testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(start))
-            os.makedirs(testsavedir, exist_ok=True)
-            with torch.no_grad():
-                test_view_pose = torch.tensor(poses_test[0])
-                N_timesteps = images_test.shape[0]
-                test_timesteps = torch.arange(N_timesteps) / (N_timesteps - 1)
-                test_view_poses = test_view_pose.unsqueeze(0).repeat(N_timesteps, 1, 1)
-                print(test_view_poses.shape)
-                test_view_poses = torch.tensor(poses_train[0]).unsqueeze(0).repeat(N_timesteps, 1, 1)
-                print(test_view_poses.shape)
-                render_path(test_view_poses, hwf, K, render_kwargs_test, time_steps=test_timesteps, gt_imgs=images_test,
-                            savedir=testsavedir)
-            return
 
     # Prepare raybatch tensor if batching random rays
     N_rand = args.N_rand
