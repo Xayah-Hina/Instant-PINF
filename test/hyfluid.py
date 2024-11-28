@@ -624,10 +624,6 @@ def train():
         [0, 0, 1]
     ])
 
-    # Create log dir and copy the config file
-    basedir = args.basedir
-    expname = args.expname
-
     # Create nerf model
     ############################
     from encoder import HashEncoderHyFluid
@@ -780,6 +776,7 @@ def train():
         ################################
 
         # Rest is logging
+        os.makedirs(os.path.join(basedir, expname), exist_ok=True)
         if i % args.i_weights == 0:
             path = os.path.join(basedir, expname, '{:06d}.tar'.format(i))
             torch.save({
