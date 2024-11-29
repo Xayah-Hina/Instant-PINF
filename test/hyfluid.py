@@ -577,7 +577,9 @@ def render_rays(ray_batch,
 
 if __name__ == '__main__':
     ti.init(arch=ti.cuda, device_memory_GB=36.0)
+    torch.set_default_tensor_type('torch.cuda.FloatTensor')
     from types import SimpleNamespace
+
     args_npz = np.load("args.npz", allow_pickle=True)
     args = SimpleNamespace(**{
         key: value.item() if isinstance(value, np.ndarray) and value.size == 1 else
@@ -608,11 +610,12 @@ if __name__ == '__main__':
     near = pinf_data_test['near'].item()
     far = pinf_data_test['far'].item()
 
+    render_timesteps = torch.tensor(render_timesteps, device=device, dtype=torch.float32)
+    render_poses = torch.tensor(render_poses, device=device, dtype=torch.float32)
+
     global bbox_model
     voxel_tran_inv = np.linalg.inv(voxel_tran)
     bbox_model = BBox_Tool(voxel_tran_inv, voxel_scale)
-    render_timesteps = torch.tensor(render_timesteps, dtype=torch.float32)
-    print('Loaded scalarflow', images_train_.shape, render_poses.shape, hwf, args.datadir)
 
     # Cast intrinsics to right types
     H, W, focal = hwf
@@ -628,18 +631,12 @@ if __name__ == '__main__':
     # Create nerf model
     ############################
     from encoder import HashEncoderHyFluid
-    if args.encoder == 'ingp':
-        max_res = np.array(
-            [args.finest_resolution, args.finest_resolution, args.finest_resolution, args.finest_resolution_t])
-        min_res = np.array([args.base_resolution, args.base_resolution, args.base_resolution, args.base_resolution_t])
 
-        # embed_fn = Hash4Encoder(max_res=max_res, min_res=min_res, num_scales=args.num_levels,
-        #                         max_params=2 ** args.log2_hashmap_size)
-        embed_fn = HashEncoderHyFluid(min_res=min_res, max_res=max_res, num_scales=args.num_levels, max_params=2 ** args.log2_hashmap_size)
-        input_ch = embed_fn.num_scales * 2  # default 2 params per scale
-        embedding_params = list(embed_fn.parameters())
-    else:
-        raise NotImplementedError
+    max_res = np.array([args.finest_resolution, args.finest_resolution, args.finest_resolution, args.finest_resolution_t])
+    min_res = np.array([args.base_resolution, args.base_resolution, args.base_resolution, args.base_resolution_t])
+    embed_fn = HashEncoderHyFluid(min_res=min_res, max_res=max_res, num_scales=args.num_levels, max_params=2 ** args.log2_hashmap_size)
+    input_ch = embed_fn.num_scales * 2  # default 2 params per scale
+    embedding_params = list(embed_fn.parameters())
 
     model = NeRFSmall(num_layers=2,
                       hidden_dim=64,
@@ -662,7 +659,6 @@ if __name__ == '__main__':
         {'params': embedding_params, 'eps': 1e-15}
     ], lr=args.lrate, betas=(0.9, 0.99))
     grad_vars += list(embedding_params)
-    start = 0
     basedir = args.basedir
     expname = args.expname
 
@@ -672,23 +668,13 @@ if __name__ == '__main__':
         'N_samples': args.N_samples,
         'network_fn': model,
         'embed_fn': embed_fn,
+        'near': near,
+        'far': far,
     }
-
     render_kwargs_test = {k: render_kwargs_train[k] for k in render_kwargs_train}
     render_kwargs_test['perturb'] = False
 
     ############################
-    global_step = start
-
-    bds_dict = {
-        'near': near,
-        'far': far,
-    }
-    render_kwargs_train.update(bds_dict)
-    render_kwargs_test.update(bds_dict)
-
-    # Move testing data to GPU
-    render_poses = torch.Tensor(render_poses).to(device)
 
     # Prepare raybatch tensor if batching random rays
     N_rand = args.N_rand
@@ -721,9 +707,12 @@ if __name__ == '__main__':
 
     loss_list = []
     psnr_list = []
-    start = start + 1
     loss_meter, psnr_meter = AverageMeter(), AverageMeter()
     resample_rays = False
+
+    start = 0
+    start = start + 1
+    global_step = start
     for i in trange(start, args.N_iters + 1):
         # Sample random ray batch
         batch_ray_idx = ray_idxs[i_batch:i_batch + N_rand]
@@ -741,8 +730,7 @@ if __name__ == '__main__':
         time_idx_residual = time_idx - time_idx_floor.float()
         frames_floor = images_train[time_idx_floor]  # [N_t, VHW, 3]
         frames_ceil = images_train[time_idx_ceil]  # [N_t, VHW, 3]
-        frames_interp = frames_floor * (1 - time_idx_residual).unsqueeze(-1) + \
-                        frames_ceil * time_idx_residual.unsqueeze(-1)  # [N_t, VHW, 3]
+        frames_interp = frames_floor * (1 - time_idx_residual).unsqueeze(-1) + frames_ceil * time_idx_residual.unsqueeze(-1)  # [N_t, VHW, 3]
         time_step = time_idx / (T - 1) if T > 1 else torch.zeros_like(time_idx)
         points = frames_interp[:, batch_ray_idx]  # [N_t, B, 3]
         target_s = points.flatten(0, 1)  # [N_t*B, 3]
