@@ -327,22 +327,6 @@ class RAdam(Optimizer):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 
-
-def batchify_rays(rays_flat, chunk=1024 * 64, **kwargs):
-    """Render rays in smaller minibatches to avoid OOM.
-    """
-    all_ret = {}
-    for i in range(0, rays_flat.shape[0], chunk):
-        ret = render_rays(rays_flat[i:i + chunk], **kwargs)
-        for k in ret:
-            if k not in all_ret:
-                all_ret[k] = []
-            all_ret[k].append(ret[k])
-
-    all_ret = {k: torch.cat(all_ret[k], 0) for k in all_ret}
-    return all_ret
-
-
 def render(H, W, K, rays=None, c2w=None,
            near=0., far=1., time_step=None,
            **kwargs):
@@ -384,7 +368,16 @@ def render(H, W, K, rays=None, c2w=None,
     rays = rays.flatten(0, 1)  # [n_time_steps * n_rays, 7]
 
     # Render and reshape
-    all_ret = batchify_rays(rays, **kwargs)
+    all_ret = {}
+    chunk=1024 * 64
+    for i in range(0, rays.shape[0], chunk):
+        ret = render_rays(rays[i:i + chunk], **kwargs)
+        for k in ret:
+            if k not in all_ret:
+                all_ret[k] = []
+            all_ret[k].append(ret[k])
+    all_ret = {k: torch.cat(all_ret[k], 0) for k in all_ret}
+
     if N_t == 1:
         for k in all_ret:
             k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
