@@ -389,7 +389,7 @@ def render(H, W, K, rays=None, c2w=None,
     return ret_list + ret_dict
 
 
-def render_path(render_poses, hwf, K, render_kwargs, gt_imgs=None, savedir=None, time_steps=None):
+def render_path(render_poses, hwf, K, near, far, render_kwargs, gt_imgs=None, savedir=None, time_steps=None):
     def merge_imgs(save_dir, framerate=30, prefix=''):
         os.system(
             'ffmpeg -hide_banner -loglevel error -y -i {0}/{1}%03d.png -vf palettegen {0}/palette.png'.format(save_dir,
@@ -401,9 +401,8 @@ def render_path(render_poses, hwf, K, render_kwargs, gt_imgs=None, savedir=None,
             'ffmpeg -hide_banner -loglevel error -y -framerate {0} -i {1}/{2}%03d.png -i {1}/palette.png -lavfi paletteuse {1}/_{2}.mp4'.format(
                 framerate, save_dir, prefix))
 
-    render_kwargs.update(chunk=512 * 64)
+    chunk = 512 * 64 # TODO: render_kwargs.update(chunk=512 * 64)
     H, W, focal = hwf
-    near, far = render_kwargs['near'], render_kwargs['far']
     if time_steps is None:
         time_steps = torch.ones(render_poses.shape[0], dtype=torch.float32)
 
@@ -765,7 +764,7 @@ if __name__ == '__main__':
             testsavedir = os.path.join(basedir, expname, 'spiral_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
             with torch.no_grad():
-                render_path(render_poses, hwf, K, render_kwargs_test, time_steps=render_timesteps, savedir=testsavedir)
+                render_path(render_poses, hwf, K, near, far, render_kwargs_test, time_steps=render_timesteps, savedir=testsavedir)
 
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
@@ -774,7 +773,7 @@ if __name__ == '__main__':
                 N_timesteps = images_test.shape[0]
                 test_timesteps = torch.arange(N_timesteps) / (N_timesteps - 1)
                 test_view_poses = test_view_pose.unsqueeze(0).repeat(N_timesteps, 1, 1)
-                render_path(test_view_poses, hwf, K, render_kwargs_test, time_steps=test_timesteps, gt_imgs=images_test,
+                render_path(test_view_poses, hwf, K, near, far, render_kwargs_test, time_steps=test_timesteps, gt_imgs=images_test,
                             savedir=testsavedir)
 
         if i % args.i_print == 0:
