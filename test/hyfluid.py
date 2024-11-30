@@ -327,9 +327,9 @@ class RAdam(Optimizer):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 
-def render(H, W, K, rays=None, c2w=None,
-           near=0., far=1., time_step=None,
-           **kwargs):
+
+def render(H, W, K, network_query_fn, model, N_samples, perturb, rays=None, c2w=None,
+           near=0., far=1., time_step=None, chunk=1024 * 64):
     """Render rays
     Args:
       H: int. Height of image in pixels.
@@ -369,9 +369,8 @@ def render(H, W, K, rays=None, c2w=None,
 
     # Render and reshape
     all_ret = {}
-    chunk=1024 * 64
     for i in range(0, rays.shape[0], chunk):
-        ret = render_rays(rays[i:i + chunk], **kwargs)
+        ret = render_rays(rays[i:i + chunk], network_query_fn=network_query_fn, network_fn=model, N_samples=N_samples, perturb=float(perturb))
         for k in ret:
             if k not in all_ret:
                 all_ret[k] = []
@@ -389,7 +388,7 @@ def render(H, W, K, rays=None, c2w=None,
     return ret_list + ret_dict
 
 
-def render_path(render_poses, hwf, K, near, far, render_kwargs, gt_imgs=None, savedir=None, time_steps=None):
+def render_path(render_poses, hwf, K, near, far, network_query_fn, model, N_samples, gt_imgs=None, savedir=None, time_steps=None):
     def merge_imgs(save_dir, framerate=30, prefix=''):
         os.system(
             'ffmpeg -hide_banner -loglevel error -y -i {0}/{1}%03d.png -vf palettegen {0}/palette.png'.format(save_dir,
@@ -401,7 +400,7 @@ def render_path(render_poses, hwf, K, near, far, render_kwargs, gt_imgs=None, sa
             'ffmpeg -hide_banner -loglevel error -y -framerate {0} -i {1}/{2}%03d.png -i {1}/palette.png -lavfi paletteuse {1}/_{2}.mp4'.format(
                 framerate, save_dir, prefix))
 
-    chunk = 512 * 64 # TODO: render_kwargs.update(chunk=512 * 64)
+    chunk = 512 * 64  # TODO: render_kwargs.update(chunk=512 * 64)
     H, W, focal = hwf
     if time_steps is None:
         time_steps = torch.ones(render_poses.shape[0], dtype=torch.float32)
@@ -415,7 +414,7 @@ def render_path(render_poses, hwf, K, near, far, render_kwargs, gt_imgs=None, sa
     lpips_net = lpips.LPIPS().cuda()
 
     for i, c2w in enumerate(tqdm(render_poses)):
-        rgb, depth, acc, _ = render(H, W, K, c2w=c2w[:3, :4], time_step=time_steps[i][None], **render_kwargs)
+        rgb, depth, acc, _ = render(H, W, K, network_query_fn = network_query_fn, model = model, N_samples = args.N_samples, perturb = False, c2w=c2w[:3, :4], time_step=time_steps[i][None], chunk=chunk)
         rgbs.append(rgb.cpu().numpy())
         # normalize depth to [0,1]
         depth = (depth - near) / (far - near)
@@ -501,10 +500,10 @@ def raw2outputs(raw, z_vals, rays_d, learned_rgb=None):
 
 def render_rays(ray_batch,
                 network_query_fn,
+                network_fn,
                 N_samples,
                 retraw=False,
-                perturb=0.,
-                **kwargs):
+                perturb=0.):
     """Volumetric rendering.
     Args:
       ray_batch: array of shape [batch_size, ...]. All information necessary
@@ -558,8 +557,7 @@ def render_rays(ray_batch,
 
     raw_flat[bbox_mask] = network_query_fn(pts)
     raw = raw_flat.reshape(N_rays, N_samples, out_dim)
-    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d,
-                                                                 learned_rgb=kwargs['network_fn'].rgb, )
+    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, learned_rgb=network_fn.rgb)
 
     ret = {'rgb_map': rgb_map, 'depth_map': depth_map, 'acc_map': acc_map}
     if retraw:
@@ -654,18 +652,6 @@ if __name__ == '__main__':
     basedir = args.basedir
     expname = args.expname
 
-    render_kwargs_train = {
-        'network_query_fn': network_query_fn,
-        'perturb': args.perturb,
-        'N_samples': args.N_samples,
-        'network_fn': model,
-        'embed_fn': embed_fn,
-        'near': near,
-        'far': far,
-    }
-    render_kwargs_test = {k: render_kwargs_train[k] for k in render_kwargs_train}
-    render_kwargs_test['perturb'] = False
-
     ############################
 
     # Prepare raybatch tensor if batching random rays
@@ -734,8 +720,7 @@ if __name__ == '__main__':
             resample_rays = True
 
         #####  Core optimization loop  #####
-        rgb, depth, acc, extras = render(H, W, K, rays=batch_rays, time_step=time_step,
-                                         **render_kwargs_train)
+        rgb, depth, acc, extras = render(H, W, K, network_query_fn = network_query_fn, model = model, N_samples = args.N_samples, perturb = True, rays=batch_rays, time_step=time_step)
 
         img_loss = img2mse(rgb, target_s)
         loss = img_loss
@@ -764,7 +749,7 @@ if __name__ == '__main__':
             testsavedir = os.path.join(basedir, expname, 'spiral_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
             with torch.no_grad():
-                render_path(render_poses, hwf, K, near, far, render_kwargs_test, time_steps=render_timesteps, savedir=testsavedir)
+                render_path(render_poses, hwf, K, near, far, network_query_fn = network_query_fn, model = model, N_samples = args.N_samples, time_steps=render_timesteps, savedir=testsavedir)
 
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
@@ -773,7 +758,7 @@ if __name__ == '__main__':
                 N_timesteps = images_test.shape[0]
                 test_timesteps = torch.arange(N_timesteps) / (N_timesteps - 1)
                 test_view_poses = test_view_pose.unsqueeze(0).repeat(N_timesteps, 1, 1)
-                render_path(test_view_poses, hwf, K, near, far, render_kwargs_test, time_steps=test_timesteps, gt_imgs=images_test,
+                render_path(test_view_poses, hwf, K, near, far, network_query_fn = network_query_fn, model = model, N_samples = args.N_samples, time_steps=test_timesteps, gt_imgs=images_test,
                             savedir=testsavedir)
 
         if i % args.i_print == 0:
