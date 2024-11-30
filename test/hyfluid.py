@@ -328,24 +328,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 
 
-def batchify_rays(rays_flat, chunk=1024 * 64, **kwargs):
-    """Render rays in smaller minibatches to avoid OOM.
-    """
-    all_ret = {}
-    for i in range(0, rays_flat.shape[0], chunk):
-        ret = render_rays(rays_flat[i:i + chunk], **kwargs)
-        for k in ret:
-            if k not in all_ret:
-                all_ret[k] = []
-            all_ret[k].append(ret[k])
-
-    all_ret = {k: torch.cat(all_ret[k], 0) for k in all_ret}
-    return all_ret
-
-
-def render(H, W, K, rays=None, c2w=None,
-           near=0., far=1., time_step=None,
-           **kwargs):
+def render(H, W, K, network_query_fn, network_fn, chunk=1024 * 64, rays=None, c2w=None,
+           near=0., far=1., time_step=None, retraw=False):
     """Render rays
     Args:
       H: int. Height of image in pixels.
@@ -384,7 +368,59 @@ def render(H, W, K, rays=None, c2w=None,
     rays = rays.flatten(0, 1)  # [n_time_steps * n_rays, 7]
 
     # Render and reshape
-    all_ret = batchify_rays(rays, **kwargs)
+    all_ret = {}
+    for i in range(0, rays.shape[0], chunk):
+
+        ray_batch = rays[i:i + chunk]
+        N_rays = ray_batch.shape[0]
+        rays_o, rays_d = ray_batch[:, 0:3], ray_batch[:, 3:6]  # [N_rays, 3] each
+        time_step = ray_batch[:, -1]
+        bounds = torch.reshape(ray_batch[..., 6:8], [-1, 1, 2])
+        near, far = bounds[..., 0], bounds[..., 1]  # [-1,1]
+
+        t_vals = torch.linspace(0., 1., steps=args.N_samples)
+        z_vals = near * (1. - t_vals) + far * (t_vals)
+
+        z_vals = z_vals.expand([N_rays, args.N_samples])
+
+        if args.perturb > 0.:
+            # get intervals between samples
+            mids = .5 * (z_vals[..., 1:] + z_vals[..., :-1])
+            upper = torch.cat([mids, z_vals[..., -1:]], -1)
+            lower = torch.cat([z_vals[..., :1], mids], -1)
+            # stratified samples in those intervals
+            t_rand = torch.rand(z_vals.shape)
+
+            z_vals = lower + (upper - lower) * t_rand
+
+        pts = rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]  # [N_rays, N_samples, 3]
+        pts_time_step = time_step[..., None, None].expand(-1, pts.shape[1], -1)
+        pts = torch.cat([pts, pts_time_step], -1)  # [..., 4]
+        pts_flat = torch.reshape(pts, [-1, 4])
+        out_dim = 1
+        raw_flat = torch.zeros([N_rays, args.N_samples, out_dim]).reshape(-1, out_dim)
+
+        bbox_mask = bbox_model.insideMask(pts_flat[..., :3], to_float=False)
+        if bbox_mask.sum() == 0:
+            bbox_mask[0] = True  # in case zero rays are inside the bbox
+        pts = pts_flat[bbox_mask]
+
+        raw_flat[bbox_mask] = network_query_fn(pts)
+        raw = raw_flat.reshape(N_rays, args.N_samples, out_dim)
+        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d,
+                                                                     learned_rgb=network_fn.rgb, )
+
+        ret = {'rgb_map': rgb_map, 'depth_map': depth_map, 'acc_map': acc_map}
+        if retraw:
+            ret['raw'] = raw
+
+        for k in ret:
+            if k not in all_ret:
+                all_ret[k] = []
+            all_ret[k].append(ret[k])
+
+    all_ret = {k: torch.cat(all_ret[k], 0) for k in all_ret}
+
     if N_t == 1:
         for k in all_ret:
             k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
@@ -396,7 +432,7 @@ def render(H, W, K, rays=None, c2w=None,
     return ret_list + ret_dict
 
 
-def render_path(render_poses, hwf, K, render_kwargs, gt_imgs=None, savedir=None, time_steps=None):
+def render_path(render_poses, hwf, K, network_query_fn, network_fn, near, far, gt_imgs=None, savedir=None, time_steps=None):
     def merge_imgs(save_dir, framerate=30, prefix=''):
         os.system(
             'ffmpeg -hide_banner -loglevel error -y -i {0}/{1}%03d.png -vf palettegen {0}/palette.png'.format(save_dir,
@@ -408,9 +444,7 @@ def render_path(render_poses, hwf, K, render_kwargs, gt_imgs=None, savedir=None,
             'ffmpeg -hide_banner -loglevel error -y -framerate {0} -i {1}/{2}%03d.png -i {1}/palette.png -lavfi paletteuse {1}/_{2}.mp4'.format(
                 framerate, save_dir, prefix))
 
-    render_kwargs.update(chunk=512 * 64)
     H, W, focal = hwf
-    near, far = render_kwargs['near'], render_kwargs['far']
     if time_steps is None:
         time_steps = torch.ones(render_poses.shape[0], dtype=torch.float32)
 
@@ -423,7 +457,7 @@ def render_path(render_poses, hwf, K, render_kwargs, gt_imgs=None, savedir=None,
     lpips_net = lpips.LPIPS().cuda()
 
     for i, c2w in enumerate(tqdm(render_poses)):
-        rgb, depth, acc, _ = render(H, W, K, c2w=c2w[:3, :4], time_step=time_steps[i][None], **render_kwargs)
+        rgb, depth, acc, _ = render(H, W, K, network_query_fn, network_fn, chunk=512 * 64, c2w=c2w[:3, :4], time_step=time_steps[i][None])
         rgbs.append(rgb.cpu().numpy())
         # normalize depth to [0,1]
         depth = (depth - near) / (far - near)
@@ -662,17 +696,17 @@ if __name__ == '__main__':
     basedir = args.basedir
     expname = args.expname
 
-    render_kwargs_train = {
-        'network_query_fn': network_query_fn,
-        'perturb': args.perturb,
-        'N_samples': args.N_samples,
-        'network_fn': model,
-        'embed_fn': embed_fn,
-        'near': near,
-        'far': far,
-    }
-    render_kwargs_test = {k: render_kwargs_train[k] for k in render_kwargs_train}
-    render_kwargs_test['perturb'] = False
+    # render_kwargs_train = {
+    #     'network_query_fn': network_query_fn,
+    #     'perturb': args.perturb,
+    #     'N_samples': args.N_samples,
+    #     'network_fn': model,
+    #     'embed_fn': embed_fn,
+    #     'near': near,
+    #     'far': far,
+    # }
+    # render_kwargs_test = {k: render_kwargs_train[k] for k in render_kwargs_train}
+    # render_kwargs_test['perturb'] = False
 
     ############################
 
@@ -742,8 +776,7 @@ if __name__ == '__main__':
             resample_rays = True
 
         #####  Core optimization loop  #####
-        rgb, depth, acc, extras = render(H, W, K, rays=batch_rays, time_step=time_step,
-                                         **render_kwargs_train)
+        rgb, depth, acc, extras = render(H, W, K, network_query_fn, model, rays=batch_rays, time_step=time_step)
 
         img_loss = img2mse(rgb, target_s)
         loss = img_loss
@@ -772,7 +805,7 @@ if __name__ == '__main__':
             testsavedir = os.path.join(basedir, expname, 'spiral_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
             with torch.no_grad():
-                render_path(render_poses, hwf, K, render_kwargs_test, time_steps=render_timesteps, savedir=testsavedir)
+                render_path(render_poses, hwf, K, time_steps=render_timesteps, savedir=testsavedir)
 
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
@@ -781,7 +814,7 @@ if __name__ == '__main__':
                 N_timesteps = images_test.shape[0]
                 test_timesteps = torch.arange(N_timesteps) / (N_timesteps - 1)
                 test_view_poses = test_view_pose.unsqueeze(0).repeat(N_timesteps, 1, 1)
-                render_path(test_view_poses, hwf, K, render_kwargs_test, time_steps=test_timesteps, gt_imgs=images_test,
+                render_path(test_view_poses, hwf, K, time_steps=test_timesteps, gt_imgs=images_test,
                             savedir=testsavedir)
 
         if i % args.i_print == 0:
