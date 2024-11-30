@@ -805,7 +805,7 @@ if __name__ == '__main__':
             testsavedir = os.path.join(basedir, expname, 'spiral_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
             with torch.no_grad():
-                render_path(render_poses, hwf, K, time_steps=render_timesteps, savedir=testsavedir)
+                render_path(render_poses, hwf, K, network_query_fn, model, near, far, time_steps=render_timesteps, savedir=testsavedir)
 
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
@@ -814,7 +814,7 @@ if __name__ == '__main__':
                 N_timesteps = images_test.shape[0]
                 test_timesteps = torch.arange(N_timesteps) / (N_timesteps - 1)
                 test_view_poses = test_view_pose.unsqueeze(0).repeat(N_timesteps, 1, 1)
-                render_path(test_view_poses, hwf, K, time_steps=test_timesteps, gt_imgs=images_test,
+                render_path(test_view_poses, hwf, K, network_query_fn, model, near, far, time_steps=test_timesteps, gt_imgs=images_test,
                             savedir=testsavedir)
 
         if i % args.i_print == 0:
