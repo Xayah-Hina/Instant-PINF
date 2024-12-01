@@ -13,6 +13,7 @@ device = torch.device("cuda")
 
 if __name__ == '__main__':
     from types import SimpleNamespace
+
     args_npz = np.load("args.npz", allow_pickle=True)
     args = SimpleNamespace(**{
         key: value.item() if isinstance(value, np.ndarray) and value.size == 1 else
@@ -350,6 +351,40 @@ if __name__ == '__main__':
     ray_idxs_gpu = torch.randperm(rays_gpu.shape[0], device=device, dtype=torch.int32)
     print(f'images_train: {images_train_gpu.shape}, rays: {rays_gpu.shape}, T: {T}, S: {S}')
 
+    img2mse = lambda x, y: torch.mean((x - y) ** 2)
+    mse2psnr = lambda x: -10. * torch.log(x) / torch.log(torch.tensor([10.], device=device))
+    to8b = lambda x: (255 * np.clip(x, 0, 1)).astype(np.uint8)
+
+    class AverageMeter(object):
+        """Computes and stores the average and current value"""
+        val = 0
+        avg = 0
+        sum = 0
+        count = 0
+        tot_count = 0
+
+        def __init__(self):
+            self.reset()
+            self.tot_count = 0
+
+        def reset(self):
+            self.val = 0
+            self.avg = 0
+            self.sum = 0
+            self.count = 0
+
+        def update(self, val, n=1):
+            self.val = float(val)
+            self.sum += float(val) * n
+            self.count += n
+            self.tot_count += n
+            self.avg = self.sum / self.count
+
+    loss_list = []
+    psnr_list = []
+    loss_meter, psnr_meter = AverageMeter(), AverageMeter()
+    resample_rays = False
+
     start = 0
     i_batch = 0
     # for i in trange(start + 1, args.N_iters + 1):
@@ -374,7 +409,7 @@ if __name__ == '__main__':
         i_batch += args.N_rand
         if i_batch >= rays_gpu.shape[0]:
             print("Shuffle data after an epoch!")
-            ray_idxs = torch.randperm(rays_gpu.shape[0], device=device)
+            ray_idxs_gpu = torch.randperm(rays_gpu.shape[0], device=device)
             i_batch = 0
             resample_rays = True
 
@@ -396,7 +431,6 @@ if __name__ == '__main__':
         time_step_expanded = time_step.expand(pts.shape[0], pts.shape[1], 1)
         pts_with_time = torch.cat([pts, time_step_expanded], dim=-1)
         pts_with_time_flat = torch.reshape(pts_with_time, [-1, pts_with_time.shape[-1]])
-        print(f'pts_with_time: {pts_with_time_flat.shape}')
 
         out_dim = 1
         raw_flat = torch.zeros([pts_with_time_flat.shape[0], out_dim], device=device, dtype=torch.float32)
@@ -407,6 +441,82 @@ if __name__ == '__main__':
         pts_final = pts_with_time_flat[bbox_mask]
         raw_flat[bbox_mask] = model(embed_fn(pts_final))
         raw = raw_flat.reshape(pts_with_time.shape[0], pts_with_time.shape[1], out_dim)
-        print(f'raw: {raw.shape}')
-    #####################################################################################################################################
+
+        raw2alpha = lambda raw, dists, act_fn=torch.nn.functional.relu: 1. - torch.exp(-act_fn(raw) * dists)
+        dists = _z_vals[..., 1:] - _z_vals[..., :-1]
+        dists = torch.cat([dists, torch.tensor([1e10], device=device).expand(dists[..., :1].shape)], -1)
+        dists = dists * torch.norm(_rays_d[..., None, :], dim=-1)
+        rgb = torch.ones(3, device=device) * (0.6 + torch.tanh(model.rgb) * 0.4)
+        noise = 0.
+        alpha = raw2alpha(raw[..., -1] + noise, dists)
+        weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1), device=device), 1. - alpha + 1e-10], -1),
+                                        -1)[:, :-1]
+        rgb_map = torch.sum(weights[..., None] * rgb, -2)
+        depth_map = torch.sum(weights * _z_vals, -1) / (torch.sum(weights, -1) + 1e-10)
+        disp_map = 1. / torch.max(1e-10 * torch.ones_like(depth_map), depth_map)
+        acc_map = torch.sum(weights, -1)
+        depth_map[acc_map < 1e-1] = 0.
+
+        ret = {
+            'rgb_map': rgb_map,
+            'disp_map': disp_map,
+            'acc_map': acc_map,
+            'weights': weights,
+            'depth_map': depth_map,
+        }
+
+        #####################################################################################################################################
+        img_loss = img2mse(rgb, target_s)
+        loss = img_loss
+        psnr = mse2psnr(img_loss)
+        loss_meter.update(loss.item())
+        psnr_meter.update(psnr.item())
+
+        for param in grad_vars:  # slightly faster than optimizer.zero_grad()
+            param.grad = None
+        loss.backward()
+        optimizer.step()
+
+        decay_rate = 0.1
+        decay_steps = args.lrate_decay
+        new_lrate = args.lrate * (decay_rate ** (i / decay_steps))
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = new_lrate
+
+        os.makedirs(os.path.join(args.basedir, args.expname), exist_ok=True)
+
+        if i % args.i_print == 0:
+            tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss_meter.avg:.2g}  PSNR: {psnr_meter.avg:.4g}")
+            loss_list.append(loss_meter.avg)
+            psnr_list.append(psnr_meter.avg)
+            loss_psnr = {
+                "losses": loss_list,
+                "psnr": psnr_list,
+            }
+            loss_meter.reset()
+            psnr_meter.reset()
+
+        if resample_rays:
+            print("Sampling new rays!")
+            rays_list = []
+            ij = []
+            for p in poses_train[:, :3, :4]:
+                r_o, r_d, i_, j_ = get_rays_np_continuous(H, W, K, p)
+                rays_list.append([r_o, r_d])
+                ij.append([i_, j_])
+            rays_np = np.stack(rays_list, 0)  # [V, ro+rd=2, H, W, 3]
+            ij = np.stack(ij, 0)  # [V, 2, H, W]
+            images_train_sample = sample_bilinear(images_train_, ij)  # [T, V, H, W, 3]
+            rays_np = np.transpose(rays_np, [0, 2, 3, 1, 4])  # [V, H, W, ro+rd=2, 3]
+            rays_np = np.reshape(rays_np, [-1, 2, 3])  # [VHW, ro+rd=2, 3]
+            rays_np = rays_np.astype(np.float32)
+
+            # Move training data to GPU
+            images_train_gpu = torch.tensor(images_train_sample, device=device, dtype=torch.float32).flatten(start_dim=1, end_dim=3)
+            T, S, _ = images_train_gpu.shape
+            rays_gpu = torch.tensor(rays_np, device=device, dtype=torch.float32)
+            ray_idxs_gpu = torch.randperm(rays_gpu.shape[0], device=device, dtype=torch.int32)
+
+            i_batch = 0
+            resample_rays = False
 
