@@ -42,7 +42,7 @@ if __name__ == '__main__':
     max_res = np.array([args.finest_resolution, args.finest_resolution, args.finest_resolution, args.finest_resolution_t])
     min_res = np.array([args.base_resolution, args.base_resolution, args.base_resolution, args.base_resolution_t])
     embed_fn = HashEncoderHyFluid(min_res=min_res, max_res=max_res, num_scales=args.num_levels,
-                                  max_params=2 ** args.log2_hashmap_size)
+                                  max_params=2 ** args.log2_hashmap_size).to(device)
     input_ch = embed_fn.num_scales * 2  # default 2 params per scale
     embedding_params = list(embed_fn.parameters())
 
