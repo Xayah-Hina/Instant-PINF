@@ -387,8 +387,8 @@ if __name__ == '__main__':
 
     start = 0
     i_batch = 0
-    # for i in trange(start + 1, args.N_iters + 1):
-    for i in trange(start + 1, start + 2):
+    for i in trange(start + 1, args.N_iters + 1):
+    # for i in trange(start + 1, start + 2):
         batch_ray_idx = ray_idxs_gpu[i_batch:i_batch + args.N_rand]
         batch_rays = torch.transpose(rays_gpu[batch_ray_idx], 0, 1)
 

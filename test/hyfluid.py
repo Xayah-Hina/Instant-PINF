@@ -390,7 +390,8 @@ def render(H, W, K, rays=None, c2w=None,
     ret_dict = [{k: all_ret[k] for k in all_ret if k not in k_extract}, ]
     return ret_list + ret_dict
 
-
+    # render_path(test_view_poses, hwf, K, render_kwargs_test, time_steps=test_timesteps, gt_imgs=images_test,
+    #             savedir=testsavedir)
 def render_path(render_poses, hwf, K, render_kwargs, gt_imgs=None, savedir=None, time_steps=None):
     def merge_imgs(save_dir, framerate=30, prefix=''):
         os.system(
