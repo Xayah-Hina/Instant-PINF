@@ -570,6 +570,24 @@ def render_rays(ray_batch,
     return ret
 
 
+def get_ray_batch(RAYs: torch.Tensor, RAYs_IDX: torch.Tensor, start: int, end: int):
+    BATCH_RAYs_IDX = RAYs_IDX[start:end]  # [batch_size]
+    BATCH_RAYs_O, BATCH_RAYs_D = torch.transpose(RAYs[BATCH_RAYs_IDX], 0, 1)  # [batch_size, 3]
+    return BATCH_RAYs_O, BATCH_RAYs_D, BATCH_RAYs_IDX
+
+
+def get_frames_at_times(IMAGEs: torch.Tensor, N_frames: int, N_times: int):
+    assert N_frames > 1
+    TIMEs_IDX = torch.randperm(N_frames, device=IMAGEs.device, dtype=torch.float32)[:N_times] + torch.randn(N_times, device=IMAGEs.device, dtype=torch.float32)  # [N_times]
+    TIMEs_IDX_FLOOR = torch.clamp(torch.floor(TIMEs_IDX).long(), 0, N_frames - 1)  # [N_times]
+    TIMEs_IDX_CEIL = torch.clamp(torch.ceil(TIMEs_IDX).long(), 0, N_frames - 1)  # [N_times]
+    TIMEs_IDX_RESIDUAL = TIMEs_IDX - TIMEs_IDX_FLOOR.float()  # [N_times]
+    TIME_STEPs = TIMEs_IDX / (N_frames - 1)  # [N_times]
+
+    FRAMES_INTERPOLATED = IMAGEs[TIMEs_IDX_FLOOR] * (1 - TIMEs_IDX_RESIDUAL).view(-1, 1, 1) + IMAGEs[TIMEs_IDX_CEIL] * TIMEs_IDX_RESIDUAL.view(-1, 1, 1)
+    return FRAMES_INTERPOLATED, TIME_STEPs
+
+
 def get_points(RAYs_O: torch.Tensor, RAYs_D: torch.Tensor, near: float, far: float, N_depths: int, randomize: bool):
     T_VALs = torch.linspace(0., 1., steps=N_depths, device=RAYs_D.device, dtype=torch.float32)  # [N_depths]
     Z_VALs = near * torch.ones_like(RAYs_D[..., :1]) * (1. - T_VALs) + far * torch.ones_like(RAYs_D[..., :1]) * T_VALs  # [batch_size, N_depths]
@@ -755,27 +773,11 @@ if __name__ == '__main__':
     start = start + 1
     global_step = start
     for i in trange(start, args.N_iters + 1):
-        # Sample random ray batch
-        batch_ray_idx = ray_idxs[i_batch:i_batch + N_rand]
-        batch_rays = rays[batch_ray_idx]  # [B, 2, 3]
-        batch_rays = torch.transpose(batch_rays, 0, 1)  # [2, B, 3]
+        BATCH_RAYs_O_gpu, BATCH_RAYs_D_gpu, BATCH_RAYs_IDX_gpu = get_ray_batch(rays, ray_idxs, i_batch, i_batch + N_rand)
+        FRAMES_INTERPOLATED_gpu, TIME_STEPs_gpu = get_frames_at_times(images_train, images_train.shape[0], 1)
+        TARGET_S_gpu = FRAMES_INTERPOLATED_gpu[:, BATCH_RAYs_IDX_gpu].flatten(0, 1)
 
         i_batch += N_rand
-        # temporal bilinear sampling
-        time_idx = torch.randperm(T)[:args.N_time].float().to(device)  # [N_t]
-        time_idx += torch.randn(args.N_time) - 0.5  # -0.5 ~ 0.5
-        time_idx_floor = torch.floor(time_idx).long()
-        time_idx_ceil = torch.ceil(time_idx).long()
-        time_idx_floor = torch.clamp(time_idx_floor, 0, T - 1)
-        time_idx_ceil = torch.clamp(time_idx_ceil, 0, T - 1)
-        time_idx_residual = time_idx - time_idx_floor.float()
-        frames_floor = images_train[time_idx_floor]  # [N_t, VHW, 3]
-        frames_ceil = images_train[time_idx_ceil]  # [N_t, VHW, 3]
-        frames_interp = frames_floor * (1 - time_idx_residual).unsqueeze(-1) + frames_ceil * time_idx_residual.unsqueeze(-1)  # [N_t, VHW, 3]
-        time_step = time_idx / (T - 1) if T > 1 else torch.zeros_like(time_idx)
-        points = frames_interp[:, batch_ray_idx]  # [N_t, B, 3]
-        target_s = points.flatten(0, 1)  # [N_t*B, 3]
-
         if i_batch >= rays.shape[0]:
             print("Shuffle data after an epoch!")
             ray_idxs = torch.randperm(rays.shape[0])
@@ -783,12 +785,11 @@ if __name__ == '__main__':
             resample_rays = True
 
         #####  Core optimization loop  #####
-        rays_o, rays_d = rays
-        POINTS_gpu, DISTs_gpu = get_points(rays_o, rays_d, near, far, args.N_samples, True)
-        POINTS_TIME_gpu = torch.cat([POINTS_gpu, time_step.expand(POINTS_gpu[..., :1].shape)], dim=-1)
-        rgb = get_raw(POINTS_TIME_gpu, DISTs_gpu, rays_d, bbox_model, model, embed_fn)
+        POINTS_gpu, DISTs_gpu = get_points(BATCH_RAYs_O_gpu, BATCH_RAYs_D_gpu, near, far, args.N_samples, True)
+        POINTS_TIME_gpu = torch.cat([POINTS_gpu, TIME_STEPs_gpu.expand(POINTS_gpu[..., :1].shape)], dim=-1)
+        rgb = get_raw(POINTS_TIME_gpu, DISTs_gpu, BATCH_RAYs_D_gpu, bbox_model, model, embed_fn)
 
-        img_loss = img2mse(rgb, target_s)
+        img_loss = img2mse(rgb, TARGET_S_gpu)
         loss = img_loss
         psnr = mse2psnr(img_loss)
         loss_meter.update(loss.item())
