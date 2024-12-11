@@ -58,17 +58,16 @@ def sample_bilinear(img, xy):
     return interpolated
 
 
-def do_resample_rays():
+def do_resample_rays(H, W):
     rays_list = []
     ij = []
     for p in POSES_TRAIN_np[:, :3, :4]:
-        r_o, r_d, i_, j_ = get_rays_np_continuous(p)
+        r_o, r_d, i_, j_ = get_rays_np_continuous(H, W, p)
         rays_list.append([r_o, r_d])
         ij.append([i_, j_])
     ij = np.stack(ij, 0)
     images_train_sample = sample_bilinear(IMAGE_TRAIN_np, ij)
-    ret_IMAGE_TRAIN_gpu = torch.tensor(images_train_sample, device=device, dtype=torch.float32).flatten(start_dim=1,
-                                                                                                        end_dim=3)
+    ret_IMAGE_TRAIN_gpu = torch.tensor(images_train_sample, device=device, dtype=torch.float32).flatten(start_dim=1, end_dim=3)
 
     rays_np = np.stack(rays_list, 0)
     rays_np = np.transpose(rays_np, [0, 2, 3, 1, 4])
@@ -239,7 +238,7 @@ if __name__ == '__main__':
     loss_meter = AverageMeter()
     GRAD_vars = list(MODEL_gpu.parameters()) + list(ENCODER_gpu.parameters())
     for ITERATION in range(1, 100):
-        IMAGE_TRAIN_gpu, RAYs_gpu, RAY_IDX_gpu = do_resample_rays()
+        IMAGE_TRAIN_gpu, RAYs_gpu, RAY_IDX_gpu = do_resample_rays(H_int, W_int)
         for i in tqdm.trange(0, RAY_IDX_gpu.shape[0], batch_size):
             BATCH_RAYs_O_gpu, BATCH_RAYs_D_gpu, BATCH_RAYs_IDX_gpu = get_ray_batch(RAYs_gpu, RAY_IDX_gpu, i, i + batch_size)  # [batch_size, 3], [batch_size, 3], [batch_size]
             FRAMES_INTERPOLATED_gpu, TIME_STEPs_gpu = get_frames_at_times(IMAGE_TRAIN_gpu, IMAGE_TRAIN_gpu.shape[0], time_size)  # [N_times, N x H x W, 3], [N_times]
