@@ -477,7 +477,6 @@ if __name__ == '__main__':
     K = np.array([[FOCAL, 0, 0.5 * W], [0, FOCAL, 0.5 * H], [0, 0, 1]])
 
     import tqdm
-    total = RAY_IDX_gpu.shape[0]
     batch_size = 256
     time_size = 1
     depth_size = 192
@@ -486,7 +485,7 @@ if __name__ == '__main__':
     loss_meter = AverageMeter()
     for j in range(1, 2):
         IMAGE_TRAIN_gpu, RAYs_gpu, RAY_IDX_gpu = do_resample_rays()
-        for i in tqdm.trange(0, total, batch_size):
+        for i in tqdm.trange(0, RAY_IDX_gpu.shape[0], batch_size):
             BATCH_RAYs_O_gpu, BATCH_RAYs_D_gpu, BATCH_RAYs_IDX_gpu = get_ray_batch(RAYs_gpu, RAY_IDX_gpu, i, i + batch_size)  # [batch_size, 3], [batch_size, 3], [batch_size]
             FRAMES_INTERPOLATED_gpu, TIME_STEPs_gpu = get_frames_at_times(IMAGE_TRAIN_gpu, IMAGE_TRAIN_gpu.shape[0], time_size)  # [N_times, N x H x W, 3], [N_times]
             TARGET_S_gpu = FRAMES_INTERPOLATED_gpu[:, BATCH_RAYs_IDX_gpu].flatten(0, 1)  # [batch_size * N_times, 3]
