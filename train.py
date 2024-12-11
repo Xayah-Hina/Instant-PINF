@@ -174,7 +174,7 @@ class AverageMeter(object):
 if __name__ == '__main__':
     device = torch.device("cuda")
     ############################## Datasets ##############################
-    pinf_data = np.load("train_dataset.npz")
+    pinf_data = np.load("data/train_dataset.npz")
     IMAGE_TRAIN_np = pinf_data['images_train']
     POSES_TRAIN_np = pinf_data['poses_train']
     HWF_np = pinf_data['hwf']
