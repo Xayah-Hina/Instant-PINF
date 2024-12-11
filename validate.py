@@ -75,7 +75,7 @@ def get_raw2(POINTS_TIME: torch.Tensor, DISTs: torch.Tensor, RAYs_D_FLAT: torch.
 
 
 if __name__ == '__main__':
-    device = torch.device("cuda")
+    device = torch.device("cpu")
     ti.init(arch=ti.cuda, device_memory_GB=36.0)
     ###################################################################################
     pinf_data_test = np.load("data/test_dataset.npz")
@@ -123,7 +123,7 @@ if __name__ == '__main__':
                             input_ch=ENCODER.num_scales * 2).to(device)
 
     voxel_tran_inv = np.linalg.inv(VOXEL_TRAN_np)
-    BBOX_MODEL_gpu = bbox.BBox_Tool(voxel_tran_inv, VOXEL_SCALE_np)
+    BBOX_MODEL_gpu = bbox.BBox_Tool(voxel_tran_inv, VOXEL_SCALE_np, [0.15, 0.0, 0.15], [0.85, 1., 0.85], device=device)
     ###################################################################################
     ckpts = [os.path.join("checkpoint", f) for f in sorted(os.listdir("checkpoint")) if 'tar' in f]
     ckpt_path = ckpts[-1]
