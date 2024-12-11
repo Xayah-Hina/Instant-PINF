@@ -3,6 +3,7 @@ import taichi as ti
 import numpy as np
 import math
 
+import os
 device = torch.device("cuda")
 
 #################################################################################################################################
@@ -477,7 +478,7 @@ if __name__ == '__main__':
 
     global_step = 1
     loss_meter = AverageMeter()
-    for j in range(1, 2):
+    for ITERATION in range(1, 10):
         IMAGE_TRAIN_gpu, RAYs_gpu, RAY_IDX_gpu = do_resample_rays()
         for i in tqdm.trange(0, RAY_IDX_gpu.shape[0], batch_size):
             BATCH_RAYs_O_gpu, BATCH_RAYs_D_gpu, BATCH_RAYs_IDX_gpu = get_ray_batch(RAYs_gpu, RAY_IDX_gpu, i, i + batch_size)  # [batch_size, 3], [batch_size, 3], [batch_size]
@@ -507,4 +508,12 @@ if __name__ == '__main__':
                 for param_group in optimizer.param_groups:
                     param_group['lr'] = new_lrate
                 global_step += 1
+
+        path = os.path.join("checkpoint", '{:06d}.tar'.format(ITERATION))
+        torch.save({
+            'global_step': global_step,
+            'network_fn_state_dict': MODEL.state_dict(),
+            'embed_fn_state_dict': ENCODER.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+        }, path)
 
