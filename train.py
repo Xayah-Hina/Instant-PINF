@@ -269,7 +269,6 @@ if __name__ == '__main__':
                 global_step += 1
         os.makedirs("checkpoint", exist_ok=True)
         path = os.path.join("checkpoint", '{:06d}.tar'.format(ITERATION))
-        os.makedirs(path, exist_ok=True)
         torch.save({
             'global_step': global_step,
             'network_fn_state_dict': MODEL_gpu.state_dict(),
