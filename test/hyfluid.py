@@ -786,7 +786,7 @@ if __name__ == '__main__':
         rays_o, rays_d = rays
         POINTS_gpu, DISTs_gpu = get_points(rays_o, rays_d, near, far, args.N_samples, True)
         POINTS_TIME_gpu = torch.cat([POINTS_gpu, time_step.expand(POINTS_gpu[..., :1].shape)], dim=-1)
-        rgb = get_raw(POINTS_TIME_gpu, DISTs_gpu, rays_d)
+        rgb = get_raw(POINTS_TIME_gpu, DISTs_gpu, rays_d, bbox_model, model, embed_fn)
 
         img_loss = img2mse(rgb, target_s)
         loss = img_loss
