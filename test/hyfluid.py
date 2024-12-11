@@ -570,6 +570,52 @@ def render_rays(ray_batch,
     return ret
 
 
+def get_points(RAYs_O: torch.Tensor, RAYs_D: torch.Tensor, near: float, far: float, N_depths: int, randomize: bool):
+    T_VALs = torch.linspace(0., 1., steps=N_depths, device=RAYs_D.device, dtype=torch.float32)  # [N_depths]
+    Z_VALs = near * torch.ones_like(RAYs_D[..., :1]) * (1. - T_VALs) + far * torch.ones_like(RAYs_D[..., :1]) * T_VALs  # [batch_size, N_depths]
+
+    if randomize:
+        MID_VALs = .5 * (Z_VALs[..., 1:] + Z_VALs[..., :-1])  # [batch_size, N_depths-1]
+        UPPER_VALs = torch.cat([MID_VALs, Z_VALs[..., -1:]], -1)  # [batch_size, N_depths]
+        LOWER_VALs = torch.cat([Z_VALs[..., :1], MID_VALs], -1)  # [batch_size, N_depths]
+        T_RAND = torch.rand(Z_VALs.shape, device=RAYs_D.device, dtype=torch.float32)  # [batch_size, N_depths]
+        Z_VALs = LOWER_VALs + (UPPER_VALs - LOWER_VALs) * T_RAND  # [batch_size, N_depths]
+
+    DIST_VALs = Z_VALs[..., 1:] - Z_VALs[..., :-1]  # [batch_size, N_depths-1]
+    POINTS = RAYs_O[..., None, :] + RAYs_D[..., None, :] * Z_VALs[..., :, None]  # [batch_size, N_depths, 3]
+    return POINTS, DIST_VALs
+
+
+def get_raw(POINTS_TIME: torch.Tensor, DISTs: torch.Tensor, RAYs_D_FLAT: torch.Tensor, BBOX_MODEL_gpu, MODEL, ENCODER):
+    assert POINTS_TIME.dim() == 3 and POINTS_TIME.shape[-1] == 4
+    assert POINTS_TIME.shape[0] == DISTs.shape[0] == RAYs_D_FLAT.shape[0]
+    POINTS_TIME_FLAT = POINTS_TIME.view(-1, POINTS_TIME.shape[-1])  # [batch_size * N_depths, 4]
+    out_dim = 1
+    RAW_FLAT = torch.zeros([POINTS_TIME_FLAT.shape[0], out_dim], device=POINTS_TIME_FLAT.device, dtype=torch.float32)
+    bbox_mask = BBOX_MODEL_gpu.insideMask(POINTS_TIME_FLAT[..., :3], to_float=False)
+    if bbox_mask.sum() == 0:
+        bbox_mask[0] = True
+        assert False
+    POINTS_TIME_FLAT_FINAL = POINTS_TIME_FLAT[bbox_mask]
+
+    RAW_FLAT[bbox_mask] = MODEL(ENCODER(POINTS_TIME_FLAT_FINAL))
+
+    # for _ in range(0, POINTS_TIME_FLAT_FINAL.shape[0], batch_size):
+    #     RAW_FLAT[bbox_mask][_:_ + batch_size] = MODEL(ENCODER(POINTS_TIME_FLAT_FINAL[_:_ + batch_size]))
+    RAW = RAW_FLAT.reshape(*POINTS_TIME.shape[:-1], out_dim)
+    assert RAW.dim() == 3 and RAW.shape[-1] == 1
+
+    DISTs_cat = torch.cat([DISTs, torch.tensor([1e10], device=DISTs.device).expand(DISTs[..., :1].shape)], -1)  # [batch_size, N_depths]
+    DISTS_final = DISTs_cat * torch.norm(RAYs_D_FLAT[..., None, :], dim=-1)  # [batch_size, N_depths]
+
+    RGB_TRAINED = torch.ones(3, device=POINTS_TIME.device) * (0.6 + torch.tanh(MODEL.rgb) * 0.4)
+    raw2alpha = lambda raw, dists, act_fn=torch.nn.functional.relu: 1. - torch.exp(-act_fn(raw) * dists)
+    noise = 0.
+    alpha = raw2alpha(RAW[..., -1] + noise, DISTS_final)
+    weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1), device=device), 1. - alpha + 1e-10], -1), -1)[:, :-1]
+    rgb_map = torch.sum(weights[..., None] * RGB_TRAINED, -2)
+    return rgb_map
+
 if __name__ == '__main__':
     ti.init(arch=ti.cuda, device_memory_GB=36.0)
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
@@ -737,8 +783,10 @@ if __name__ == '__main__':
             resample_rays = True
 
         #####  Core optimization loop  #####
-        rgb, depth, acc, extras = render(H, W, K, rays=batch_rays, time_step=time_step,
-                                         **render_kwargs_train)
+        rays_o, rays_d = rays
+        POINTS_gpu, DISTs_gpu = get_points(rays_o, rays_d, near, far, args.N_samples, True)
+        POINTS_TIME_gpu = torch.cat([POINTS_gpu, time_step.expand(POINTS_gpu[..., :1].shape)], dim=-1)
+        rgb = get_raw(POINTS_TIME_gpu, DISTs_gpu, rays_d)
 
         img_loss = img2mse(rgb, target_s)
         loss = img_loss
