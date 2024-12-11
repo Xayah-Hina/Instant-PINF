@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import imageio.v2 as imageio
+import taichi as ti
 import tqdm
 import os
 
@@ -281,6 +282,7 @@ class BBox_Tool(object):
 
 
 if __name__ == '__main__':
+    ti.init(arch=ti.cuda, device_memory_GB=36.0)
     ###################################################################################
     pinf_data_test = np.load("test_dataset.npz")
     IMAGE_TEST_np = pinf_data_test['images_test']
@@ -348,11 +350,12 @@ if __name__ == '__main__':
     ENCODER.load_state_dict(ckpt['embed_fn_state_dict'])
     optimizer.load_state_dict(ckpt['optimizer_state_dict'])
     ###################################################################################
-    for i in tqdm.trange(0, test_timesteps.shape[0]):
-        test_timesteps_expended = test_timesteps[i].expand(points_flat[..., :1].shape)
-        points_time_flat_gpu = torch.cat([points_flat, test_timesteps_expended], dim=-1)
-        rgb_map_flat = get_raw2(points_time_flat_gpu, dists_flat, rays_d_flat, BBOX_MODEL_gpu, MODEL, ENCODER)
-        rgb_map = rgb_map_flat.view(points.shape[0], points.shape[1], rgb_map_flat.shape[-1])
-        to8b = lambda x: (255 * np.clip(x, 0, 1)).astype(np.uint8)
-        rgb8 = to8b(rgb_map.cpu().numpy())
-        imageio.imsave(os.path.join("output", 'rgb_{:03d}.png'.format(i)), rgb8)
+    with torch.no_grad():
+        for i in tqdm.trange(0, test_timesteps.shape[0]):
+            test_timesteps_expended = test_timesteps[i].expand(points_flat[..., :1].shape)
+            points_time_flat_gpu = torch.cat([points_flat, test_timesteps_expended], dim=-1)
+            rgb_map_flat = get_raw2(points_time_flat_gpu, dists_flat, rays_d_flat, BBOX_MODEL_gpu, MODEL, ENCODER)
+            rgb_map = rgb_map_flat.view(points.shape[0], points.shape[1], rgb_map_flat.shape[-1])
+            to8b = lambda x: (255 * np.clip(x, 0, 1)).astype(np.uint8)
+            rgb8 = to8b(rgb_map.cpu().numpy())
+            imageio.imsave(os.path.join("output", 'rgb_{:03d}.png'.format(i)), rgb8)
