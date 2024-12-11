@@ -7,8 +7,6 @@ device = torch.device("cuda")
 
 #################################################################################################################################
 from torch.optim.optimizer import Optimizer
-
-
 class RAdam(Optimizer):
 
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0, degenerated_to_sgd=False):
@@ -102,11 +100,7 @@ class RAdam(Optimizer):
                     p.data.copy_(p_data_fp32)
 
         return loss
-
-
 #################################################################################################################################
-
-
 class NeRFSmall(torch.nn.Module):
     def __init__(self,
                  num_layers=3,
@@ -434,24 +428,24 @@ if __name__ == '__main__':
     NEAR_float = pinf_data['near'].item()
     FAR_float = pinf_data['far'].item()
 
-    from types import SimpleNamespace
+    base_resolution=16
+    base_resolution_t=16
+    finest_resolution=256
+    finest_resolution_t=128
+    num_levels=16
+    log2_hashmap_size=19
 
-    args_npz = np.load("args.npz", allow_pickle=True)
-    ARGs = SimpleNamespace(**{
-        key: value.item() if isinstance(value, np.ndarray) and value.size == 1 else
-        value.tolist() if isinstance(value, np.ndarray) else
-        value
-        for key, value in args_npz.items()
-    })
+    lrate=0.01
+    lrate_decay=10000
 
     from encoder import HashEncoderHyFluid
 
     ENCODER = HashEncoderHyFluid(
-        min_res=np.array([ARGs.base_resolution, ARGs.base_resolution, ARGs.base_resolution, ARGs.base_resolution_t]),
+        min_res=np.array([base_resolution, base_resolution, base_resolution, base_resolution_t]),
         max_res=np.array(
-            [ARGs.finest_resolution, ARGs.finest_resolution, ARGs.finest_resolution, ARGs.finest_resolution_t]),
-        num_scales=ARGs.num_levels,
-        max_params=2 ** ARGs.log2_hashmap_size).to(device)
+            [finest_resolution, finest_resolution, finest_resolution, finest_resolution_t]),
+        num_scales=num_levels,
+        max_params=2 ** log2_hashmap_size).to(device)
     ENCODER_params = list(ENCODER.parameters())
 
     MODEL = NeRFSmall(num_layers=2,
@@ -465,7 +459,7 @@ if __name__ == '__main__':
     optimizer = RAdam([
         {'params': GRAD_vars, 'weight_decay': 1e-6},
         {'params': ENCODER_params, 'eps': 1e-15}
-    ], lr=ARGs.lrate, betas=(0.9, 0.99))
+    ], lr=lrate, betas=(0.9, 0.99))
     GRAD_vars += list(ENCODER_params)
 
     voxel_tran_inv = np.linalg.inv(VOXEL_TRAN_np)
@@ -504,12 +498,12 @@ if __name__ == '__main__':
 
                 loss_meter.update(loss.item())
                 if global_step % 100 == 0:
-                    tqdm.tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss_meter.avg:.2g}")
+                    tqdm.tqdm.write(f"[TRAIN] Iter: {global_step} Loss: {loss_meter.avg:.2g}")
                     loss_meter.reset()
 
                 decay_rate = 0.1
-                decay_steps = ARGs.lrate_decay
-                new_lrate = ARGs.lrate * (decay_rate ** (global_step / decay_steps))
+                decay_steps = lrate_decay
+                new_lrate = lrate * (decay_rate ** (global_step / decay_steps))
                 for param_group in optimizer.param_groups:
                     param_group['lr'] = new_lrate
                 global_step += 1
