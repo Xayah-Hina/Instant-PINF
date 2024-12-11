@@ -1,6 +1,7 @@
 import torch
 import taichi as ti
 import numpy as np
+from torch.cuda.amp import custom_bwd, custom_fwd
 
 
 @ti.func
@@ -271,7 +272,7 @@ class HashEncoderHyFluid(torch.nn.Module):
         ####################################################################################################
         class ModuleFunction(torch.autograd.Function):
             @staticmethod
-            @torch.amp.custom_fwd(cast_inputs=torch.float32, device_type='cuda')
+            @custom_fwd(cast_inputs=torch.float32)
             def forward(ctx, input_pos, params):
                 output_embedding = self.output_embedding[:input_pos.shape[0]].contiguous()
                 torch2ti(self.input_fields, input_pos.contiguous())
@@ -294,7 +295,7 @@ class HashEncoderHyFluid(torch.nn.Module):
                 return output_embedding
 
             @staticmethod
-            @torch.amp.custom_bwd(device_type='cuda')
+            @custom_bwd
             def backward(ctx, doutput):
                 self.input_fields.grad.fill(0.)
                 self.input_fields_grad.fill(0.)
@@ -306,7 +307,7 @@ class HashEncoderHyFluid(torch.nn.Module):
 
         class ModuleFunctionGrad(torch.autograd.Function):
             @staticmethod
-            @torch.amp.custom_fwd(cast_inputs=torch.float32, device_type='cuda')
+            @custom_fwd(cast_inputs=torch.float32)
             def forward(ctx, input_pos, params, doutput):
                 torch2ti(self.input_fields, input_pos.contiguous())
                 torch2ti(self.parameter_fields, params.contiguous())
@@ -332,7 +333,7 @@ class HashEncoderHyFluid(torch.nn.Module):
                 return self.input_grad[:doutput.shape[0]], self.hash_grad
 
             @staticmethod
-            @torch.amp.custom_bwd(device_type='cuda')
+            @custom_bwd
             def backward(ctx, d_input_grad, d_hash_grad):
                 self.parameter_fields.grad.fill(0.)
                 self.input_fields.grad.fill(0.)

@@ -1,216 +1,279 @@
-import torch
-import taichi as ti
 import numpy as np
-import src.dataloader
-import src.radam
-import src.encoder
-import nerfstudio.field_components.mlp
-import nerfstudio.model_components.ray_generators
-import nerfstudio.model_components.ray_samplers
-import nerfstudio.data.pixel_samplers
-import nerfstudio.model_components.scene_colliders
-import nerfstudio.model_components.losses
+import taichi as ti
+import torch
 
-import pathlib
-import time
-import tqdm
-from collections import defaultdict
-
-import nerfstudio.data.utils.dataloaders
-
-device = torch.device("cuda")
+import src.bbox as bbox
+import src.encoder as encoder
+import src.model as model
+import src.radam as radam
 
 
-def interpolate_frame(in_image_batch, boundary_frames, in_batch):
-    current_frames = in_batch['indices'][:, 0]
-    next_frames = current_frames + 1
-    skip_indices = torch.isin(current_frames, boundary_frames)
-    y_indices = in_batch['indices'][:, 1]
-    z_indices = in_batch['indices'][:, 2]
+def get_rays_np_continuous(H, W, c2w):
+    i, j = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing='xy')
+    random_offset_i = np.random.uniform(0, 1, size=(H, W))
+    random_offset_j = np.random.uniform(0, 1, size=(H, W))
+    i = i + random_offset_i
+    j = j + random_offset_j
+    i = np.clip(i, 0, W - 1)
+    j = np.clip(j, 0, H - 1)
 
-    # 获取当前帧和下一帧的像素值
-    current_pixels = in_image_batch['image'][current_frames, y_indices, z_indices]
-    next_pixels = in_image_batch['image'][torch.where(skip_indices, current_frames, next_frames), y_indices, z_indices]
-
-    # 随机插值系数
-    random_coeff = torch.rand(current_frames.shape[0], 1, device=device)
-    random_coeff_expanded = random_coeff.expand(-1, 3)
-
-    # 计算插值后的像素值
-    interpolated_pixels = current_pixels * (1 - random_coeff_expanded) + next_pixels * random_coeff_expanded
-
-    # 计算插值后的帧数，skip_indices 的帧保持原值
-    interpolated_indices = torch.where(skip_indices.unsqueeze(-1),
-                                       current_frames.unsqueeze(-1).float(),
-                                       current_frames.unsqueeze(-1).float() + random_coeff)
-    interpolated_indices = interpolated_indices % 120
-    return interpolated_pixels, interpolated_indices
+    dirs = np.stack([(i - K[0][2]) / K[0][0], -(j - K[1][2]) / K[1][1], -np.ones_like(i)], -1)
+    # Rotate ray directions from camera frame to the world frame
+    rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3, :3],
+                    -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    # Translate camera frame's origin to the world frame. It is the origin of all rays.
+    rays_o = np.broadcast_to(c2w[:3, -1], np.shape(rays_d))
+    return rays_o, rays_d, i, j
 
 
-def train():
-    #### Setup Datasets
-    dataloader = src.dataloader.load_train_data(
-        dataset_dir=pathlib.Path("C:/Users/Stolas/Desktop/xiang/Datasets/ScalarReal"),
-        split="train",
-        device=torch.device("cuda"),
-        frame_skip=1,
-        exclude_batch_keys_from_device=["image", "image_idx"],
-    )
-    image_batch = next(iter(dataloader))
-    sorted_indices = torch.argsort(image_batch["image_idx"])
-    image_batch["image_idx"] = image_batch["image_idx"].index_select(0, sorted_indices).to(device)
-    image_batch["image"] = image_batch["image"].index_select(0, sorted_indices).to(device)
+def sample_bilinear(img, xy):
+    """
+    Sample image with bilinear interpolation
+    :param img: (T, V, H, W, 3)
+    :param xy: (V, 2, H, W)
+    :return: img: (T, V, H, W, 3)
+    """
+    T, V, H, W, _ = img.shape
+    u, v = xy[:, 0], xy[:, 1]
 
-    print(f'image shape: {image_batch["image"].shape}')
-    print(f'image indices shape: {image_batch["image_idx"].shape}')
-    print(f'image device: {image_batch["image"].device}')
-    print(f'image indices: {image_batch["image_idx"].device}')
-    memory_image = image_batch['image'].element_size() * image_batch['image'].numel()
-    memory_indices = image_batch['image_idx'].element_size() * image_batch['image_idx'].numel()
-    print(f'Memory of image: {memory_image / 1024 / 1024:.2f} MB')
-    print(f'Memory of indices: {memory_indices / 1024 / 1024:.2f} MB')
+    u = np.clip(u, 0, W - 1)
+    v = np.clip(v, 0, H - 1)
 
-    #### Setup Hash Encoder
-    ti.init(arch=ti.cuda)
-    xyzt_encoder = src.encoder.HashEncoderHyFluid(
-        min_res=np.array([16, 16, 16, 16]),
-        max_res=np.array([256, 256, 256, 128]),
-        num_scales=16,
-        max_params=2 ** 19,
-    )
-    xyzt_encoder.to(device)
+    u_floor, v_floor = np.floor(u).astype(int), np.floor(v).astype(int)
+    u_ceil, v_ceil = np.ceil(u).astype(int), np.ceil(v).astype(int)
 
-    #### Setup Model & Optimizer
-    mlp = nerfstudio.field_components.mlp.MLP(
-        in_dim=xyzt_encoder.num_scales * xyzt_encoder.features_per_level,
-        num_layers=2,
-        layer_width=64,
-        out_dim=1,
-        out_activation=torch.nn.ReLU(),
-    ).to(device)
-    learned_rgb = torch.nn.Parameter(torch.tensor([0.0], device=device))
+    u_ratio, v_ratio = u - u_floor, v - v_floor
+    u_ratio, v_ratio = u_ratio[None, ..., None], v_ratio[None, ..., None]
 
-    grad_vars = list(mlp.parameters()) + [learned_rgb]
-    embedding_params = list(xyzt_encoder.parameters())
+    bottom_left = img[:, np.arange(V)[:, None, None], v_floor, u_floor]
+    bottom_right = img[:, np.arange(V)[:, None, None], v_floor, u_ceil]
+    top_left = img[:, np.arange(V)[:, None, None], v_ceil, u_floor]
+    top_right = img[:, np.arange(V)[:, None, None], v_ceil, u_ceil]
 
-    optimizer = src.radam.RAdam([
-        {'params': grad_vars, 'weight_decay': 1e-6},
-        {'params': embedding_params, 'eps': 1e-15}
-    ], lr=0.01, betas=(0.9, 0.99))
+    bottom = (1 - u_ratio) * bottom_left + u_ratio * bottom_right
+    top = (1 - u_ratio) * top_left + u_ratio * top_right
 
-    #### Setup Ray Sampler & Collider
-    pixel_sampler = nerfstudio.data.pixel_samplers.PixelSamplerConfig(num_rays_per_batch=1024).setup()
-    ray_generator = nerfstudio.model_components.ray_generators.RayGenerator(dataloader.dataset.cameras).to(device)
-    uniform_sampler = nerfstudio.model_components.ray_samplers.UniformSampler(num_samples=192).to(device)
-    near_far_collider = nerfstudio.model_components.scene_colliders.NearFarCollider(near_plane=1.1, far_plane=1.5).to(
-        device)
+    interpolated = (1 - v_ratio) * bottom + v_ratio * top
 
-    #### Optimization Loop
+    return interpolated
+
+
+def do_resample_rays():
+    rays_list = []
+    ij = []
+    for p in POSES_TRAIN_np[:, :3, :4]:
+        r_o, r_d, i_, j_ = get_rays_np_continuous(p)
+        rays_list.append([r_o, r_d])
+        ij.append([i_, j_])
+    ij = np.stack(ij, 0)
+    images_train_sample = sample_bilinear(IMAGE_TRAIN_np, ij)
+    ret_IMAGE_TRAIN_gpu = torch.tensor(images_train_sample, device=device, dtype=torch.float32).flatten(start_dim=1,
+                                                                                                        end_dim=3)
+
+    rays_np = np.stack(rays_list, 0)
+    rays_np = np.transpose(rays_np, [0, 2, 3, 1, 4])
+    rays_np = np.reshape(rays_np, [-1, 2, 3])  # [VHW, ro+rd=2, 3]
+    rays_np = rays_np.astype(np.float32)
+    ret_RAYs_gpu = torch.tensor(rays_np, device=device, dtype=torch.float32)
+    ret_RAY_IDX_gpu = torch.randperm(ret_RAYs_gpu.shape[0], device=device, dtype=torch.int32)
+
+    return ret_IMAGE_TRAIN_gpu, ret_RAYs_gpu, ret_RAY_IDX_gpu
+
+
+def get_ray_batch(RAYs: torch.Tensor, RAYs_IDX: torch.Tensor, start: int, end: int):
+    BATCH_RAYs_IDX = RAYs_IDX[start:end]  # [batch_size]
+    BATCH_RAYs_O, BATCH_RAYs_D = torch.transpose(RAYs[BATCH_RAYs_IDX], 0, 1)  # [batch_size, 3]
+    return BATCH_RAYs_O, BATCH_RAYs_D, BATCH_RAYs_IDX
+
+
+def get_frames_at_times(IMAGEs: torch.Tensor, N_frames: int, N_times: int):
+    assert N_frames > 1
+    TIMEs_IDX = torch.randperm(N_frames, device=IMAGEs.device, dtype=torch.float32)[:N_times] + torch.randn(N_times, device=IMAGEs.device, dtype=torch.float32)  # [N_times]
+    TIMEs_IDX_FLOOR = torch.clamp(torch.floor(TIMEs_IDX).long(), 0, N_frames - 1)  # [N_times]
+    TIMEs_IDX_CEIL = torch.clamp(torch.ceil(TIMEs_IDX).long(), 0, N_frames - 1)  # [N_times]
+    TIMEs_IDX_RESIDUAL = TIMEs_IDX - TIMEs_IDX_FLOOR.float()  # [N_times]
+    TIME_STEPs = TIMEs_IDX / (N_frames - 1)  # [N_times]
+
+    FRAMES_INTERPOLATED = IMAGEs[TIMEs_IDX_FLOOR] * (1 - TIMEs_IDX_RESIDUAL).view(-1, 1, 1) + IMAGEs[TIMEs_IDX_CEIL] * TIMEs_IDX_RESIDUAL.view(-1, 1, 1)
+    return FRAMES_INTERPOLATED, TIME_STEPs
+
+
+def get_points(RAYs_O: torch.Tensor, RAYs_D: torch.Tensor, near: float, far: float, N_depths: int, randomize: bool):
+    T_VALs = torch.linspace(0., 1., steps=N_depths, device=RAYs_D.device, dtype=torch.float32)  # [N_depths]
+    Z_VALs = near * torch.ones_like(RAYs_D[..., :1]) * (1. - T_VALs) + far * torch.ones_like(RAYs_D[..., :1]) * T_VALs  # [batch_size, N_depths]
+
+    if randomize:
+        MID_VALs = .5 * (Z_VALs[..., 1:] + Z_VALs[..., :-1])  # [batch_size, N_depths-1]
+        UPPER_VALs = torch.cat([MID_VALs, Z_VALs[..., -1:]], -1)  # [batch_size, N_depths]
+        LOWER_VALs = torch.cat([Z_VALs[..., :1], MID_VALs], -1)  # [batch_size, N_depths]
+        T_RAND = torch.rand(Z_VALs.shape, device=RAYs_D.device, dtype=torch.float32)  # [batch_size, N_depths]
+        Z_VALs = LOWER_VALs + (UPPER_VALs - LOWER_VALs) * T_RAND  # [batch_size, N_depths]
+
+    DIST_VALs = Z_VALs[..., 1:] - Z_VALs[..., :-1]  # [batch_size, N_depths-1]
+    POINTS = RAYs_O[..., None, :] + RAYs_D[..., None, :] * Z_VALs[..., :, None]  # [batch_size, N_depths, 3]
+    return POINTS, DIST_VALs
+
+
+def get_raw(POINTS_TIME: torch.Tensor, DISTs: torch.Tensor, RAYs_D_FLAT: torch.Tensor, BBOX_MODEL, MODEL, ENCODER):
+    assert POINTS_TIME.dim() == 3 and POINTS_TIME.shape[-1] == 4
+    assert POINTS_TIME.shape[0] == DISTs.shape[0] == RAYs_D_FLAT.shape[0]
+    POINTS_TIME_FLAT = POINTS_TIME.view(-1, POINTS_TIME.shape[-1])  # [batch_size * N_depths, 4]
+    out_dim = 1
+    RAW_FLAT = torch.zeros([POINTS_TIME_FLAT.shape[0], out_dim], device=POINTS_TIME_FLAT.device, dtype=torch.float32)
+    bbox_mask = BBOX_MODEL.insideMask(POINTS_TIME_FLAT[..., :3], to_float=False)
+    if bbox_mask.sum() == 0:
+        bbox_mask[0] = True
+        assert False
+    POINTS_TIME_FLAT_FINAL = POINTS_TIME_FLAT[bbox_mask]
+
+    RAW_FLAT[bbox_mask] = MODEL(ENCODER(POINTS_TIME_FLAT_FINAL))
+
+    # for _ in range(0, POINTS_TIME_FLAT_FINAL.shape[0], batch_size):
+    #     RAW_FLAT[bbox_mask][_:_ + batch_size] = MODEL(ENCODER(POINTS_TIME_FLAT_FINAL[_:_ + batch_size]))
+    RAW = RAW_FLAT.reshape(*POINTS_TIME.shape[:-1], out_dim)
+    assert RAW.dim() == 3 and RAW.shape[-1] == 1
+
+    DISTs_cat = torch.cat([DISTs, torch.tensor([1e10], device=DISTs.device).expand(DISTs[..., :1].shape)], -1)  # [batch_size, N_depths]
+    DISTS_final = DISTs_cat * torch.norm(RAYs_D_FLAT[..., None, :], dim=-1)  # [batch_size, N_depths]
+
+    RGB_TRAINED = torch.ones(3, device=POINTS_TIME.device) * (0.6 + torch.tanh(MODEL.rgb) * 0.4)
     raw2alpha = lambda raw, dists, act_fn=torch.nn.functional.relu: 1. - torch.exp(-act_fn(raw) * dists)
-    rgb_loss = nerfstudio.model_components.losses.MSELoss()
-    boundary_frames = torch.tensor([119, 239, 359, 479], dtype=torch.int32, device=device)
+    noise = 0.
+    alpha = raw2alpha(RAW[..., -1] + noise, DISTS_final)
+    weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1), device=device), 1. - alpha + 1e-10], -1), -1)[:, :-1]
+    rgb_map = torch.sum(weights[..., None] * RGB_TRAINED, -2)
+    return rgb_map
 
-    execution_times = defaultdict(list)
-    loss_values = []
 
-    # 模拟循环任务
-    for i in tqdm.tqdm(range(100)):
-        # 记录每一步的执行时间
-        start = time.time()
-        batch = pixel_sampler.sample(image_batch)
-        execution_times["sample"].append(time.time() - start)
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+    val = 0
+    avg = 0
+    sum = 0
+    count = 0
+    tot_count = 0
 
-        start = time.time()
-        ray_bundle = near_far_collider(ray_generator(batch['indices']))
-        execution_times["ray_bundle"].append(time.time() - start)
+    def __init__(self):
+        self.reset()
+        self.tot_count = 0
 
-        start = time.time()
-        ray_samples_uniform = uniform_sampler(ray_bundle)
-        execution_times["ray_samples_uniform"].append(time.time() - start)
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
 
-        start = time.time()
-        positions = ray_samples_uniform.frustums.get_positions()
-        execution_times["get_positions"].append(time.time() - start)
-
-        start = time.time()
-        interpolated_pixels, interpolated_indices = interpolate_frame(image_batch, boundary_frames, batch)
-        execution_times["perturb_frames_sample"].append(time.time() - start)
-
-        start = time.time()
-        frames_expanded = interpolated_indices.unsqueeze(1).expand(-1, positions.size(1), -1)  # (4096, 192, 1)
-        xyzt = torch.cat([positions, frames_expanded], dim=-1)  # (4096, 192, 4)
-        xyzt_flat = xyzt.reshape(-1, 4)
-        execution_times["xyzt"].append(time.time() - start)
-
-        start = time.time()
-        xyzt_encoded = xyzt_encoder(xyzt_flat)
-        execution_times["xyzt_encoder"].append(time.time() - start)
-
-        start = time.time()
-        raw_flat = mlp(xyzt_encoded)
-        execution_times["mlp"].append(time.time() - start)
-
-        start = time.time()
-        raw = raw_flat.reshape(xyzt.shape[0], xyzt.shape[1], raw_flat.shape[-1])
-        execution_times["raw_reshape"].append(time.time() - start)
-
-        start = time.time()
-        dists = ray_samples_uniform.deltas
-        rgb = torch.ones(3, device=device) * (0.6 + torch.tanh(learned_rgb) * 0.4)
-        alpha = raw2alpha(raw[..., -1], dists[..., -1])
-        weights = alpha * torch.cumprod(
-            torch.cat([torch.ones((alpha.shape[0], 1), device=device), 1. - alpha + 1e-10], -1),
-            -1)[:, :-1]
-        rgb_map = torch.sum(weights[..., None] * rgb, -2)
-        execution_times["raw2alpha"].append(time.time() - start)
-
-        start = time.time()
-        loss = rgb_loss(rgb_map, batch['image'])
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        new_lrate = 5e-4 * (0.1 ** (i / 250))
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = new_lrate
-        execution_times["optimizing"].append(time.time() - start)
-
-        # 记录 loss 值
-        loss_values.append(loss.item())
-
-    del image_batch["image"]
-    torch.cuda.empty_cache()
-    eval_dataloader = nerfstudio.data.utils.dataloaders.RandIndicesEvalDataloader(input_dataset=dataloader.dataset)
-    camera, batch = next(eval_dataloader)
-    camera = camera.to(device)
-    # batch['image'] = batch['image'].to(device)
-    camera_ray_bundle = near_far_collider(camera.generate_rays(camera_indices=0, keep_shape=True))
-    num_rays = len(camera_ray_bundle)
-    res = []
-    for i in range(0, num_rays, 1024):
-        start_idx = i
-        end_idx = i + 4096
-        ray_bundle = camera_ray_bundle.get_row_major_sliced_ray_bundle(start_idx, end_idx)
-        camera_ray_samples_uniform = uniform_sampler(ray_bundle.flatten())
-        camera_positions = camera_ray_samples_uniform.frustums.get_positions()
-        shape = list(camera_positions.shape)
-        shape[-1] = 1
-        camera_frames_expanded = torch.full(shape, batch['image_idx'], device=device)
-        camera_xyzt = torch.cat((camera_positions, camera_frames_expanded), dim=-1)
-        camera_xyzt_flat = camera_xyzt.reshape(-1, 4)
-        camera_xyzt_encoded = xyzt_encoder(camera_xyzt_flat)
-        camera_raw_flat = mlp(camera_xyzt_encoded)
-        camera_raw = camera_raw_flat.reshape(camera_xyzt.shape[0], camera_xyzt.shape[1], camera_raw_flat.shape[-1])
-        camera_dists = camera_ray_samples_uniform.deltas
-        camera_rgb = torch.ones(3, device=device) * (0.6 + torch.tanh(learned_rgb) * 0.4)
-        camera_alpha = raw2alpha(camera_raw[..., -1], camera_dists[..., -1])
-        camera_weights = camera_alpha * torch.cumprod(
-            torch.cat([torch.ones((camera_alpha.shape[0], 1), device=device), 1. - camera_alpha + 1e-10], -1),
-            -1)[:, :-1]
-        camera_rgb_map = torch.sum(camera_weights[..., None] * camera_rgb, -2)
-        res.append(camera_rgb_map.to(torch.device("cpu")))
-    result = torch.cat(res, dim=-1)
-    print(result.shape)
+    def update(self, val, n=1):
+        self.val = float(val)
+        self.sum += float(val) * n
+        self.count += n
+        self.tot_count += n
+        self.avg = self.sum / self.count
 
 
 if __name__ == '__main__':
-    train()
+    device = torch.device("cuda")
+    ############################## Datasets ##############################
+    pinf_data = np.load("train_dataset.npz")
+    IMAGE_TRAIN_np = pinf_data['images_train']
+    POSES_TRAIN_np = pinf_data['poses_train']
+    HWF_np = pinf_data['hwf']
+    RENDER_POSE_np = pinf_data['render_poses']
+    RENDER_TIMESTEPs_np = pinf_data['render_timesteps']
+
+    NEAR_float = pinf_data['near'].item()
+    FAR_float = pinf_data['far'].item()
+    H_int = int(HWF_np[0])
+    W_int = int(HWF_np[1])
+    FOCAL_float = float(HWF_np[2])
+    K = np.array([[FOCAL_float, 0, 0.5 * W_int], [0, FOCAL_float, 0.5 * H_int], [0, 0, 1]])
+    ############################## Datasets ##############################
+
+    ############################## Load Encoder ##############################
+    ti.init(arch=ti.cuda, device_memory_GB=36.0)
+    base_resolution = 16
+    base_resolution_t = 16
+    finest_resolution = 256
+    finest_resolution_t = 128
+    num_levels = 16
+    log2_hashmap_size = 19
+    ENCODER_gpu = encoder.HashEncoderHyFluid(
+        min_res=np.array([base_resolution, base_resolution, base_resolution, base_resolution_t]),
+        max_res=np.array([finest_resolution, finest_resolution, finest_resolution, finest_resolution_t]),
+        num_scales=num_levels,
+        max_params=2 ** log2_hashmap_size).to(device)
+    ############################## Load Encoder ##############################
+
+    ############################## Load Model ##############################
+    MODEL_gpu = model.NeRFSmall(num_layers=2,
+                                hidden_dim=64,
+                                geo_feat_dim=15,
+                                num_layers_color=2,
+                                hidden_dim_color=16,
+                                input_ch=ENCODER_gpu.num_scales * 2).to(device)
+    ############################## Load Model ##############################
+
+    ############################## Load Optimizer ##############################
+    lrate = 0.01
+    lrate_decay = 10000
+    OPTIMIZER = radam.RAdam([
+        {'params': MODEL_gpu.parameters(), 'weight_decay': 1e-6},
+        {'params': ENCODER_gpu.parameters(), 'eps': 1e-15}
+    ], lr=lrate, betas=(0.9, 0.99))
+    ############################## Load Optimizer ##############################
+
+    ############################## Load BoundingBox ##############################
+    VOXEL_TRAN_np = pinf_data['voxel_tran']
+    VOXEL_SCALE_np = pinf_data['voxel_scale']
+    voxel_tran_inv = np.linalg.inv(VOXEL_TRAN_np)
+    BBOX_MODEL_gpu = bbox.BBox_Tool(voxel_tran_inv, VOXEL_SCALE_np)
+    ############################## Load BoundingBox ##############################
+
+    import tqdm
+    import os
+
+    batch_size = 256
+    time_size = 1
+    depth_size = 192
+    global_step = 1
+    loss_meter = AverageMeter()
+    GRAD_vars = list(MODEL_gpu.parameters()) + list(ENCODER_gpu.parameters())
+    for ITERATION in range(1, 100):
+        IMAGE_TRAIN_gpu, RAYs_gpu, RAY_IDX_gpu = do_resample_rays()
+        for i in tqdm.trange(0, RAY_IDX_gpu.shape[0], batch_size):
+            BATCH_RAYs_O_gpu, BATCH_RAYs_D_gpu, BATCH_RAYs_IDX_gpu = get_ray_batch(RAYs_gpu, RAY_IDX_gpu, i, i + batch_size)  # [batch_size, 3], [batch_size, 3], [batch_size]
+            FRAMES_INTERPOLATED_gpu, TIME_STEPs_gpu = get_frames_at_times(IMAGE_TRAIN_gpu, IMAGE_TRAIN_gpu.shape[0], time_size)  # [N_times, N x H x W, 3], [N_times]
+            TARGET_S_gpu = FRAMES_INTERPOLATED_gpu[:, BATCH_RAYs_IDX_gpu].flatten(0, 1)  # [batch_size * N_times, 3]
+            POINTS_gpu, DISTs_gpu = get_points(BATCH_RAYs_O_gpu, BATCH_RAYs_D_gpu, NEAR_float, FAR_float, depth_size, randomize=True)  # [batch_size, N_depths, 3]
+            for TIME_STEP_gpu in TIME_STEPs_gpu:
+                POINTS_TIME_gpu = torch.cat([POINTS_gpu, TIME_STEP_gpu.expand(POINTS_gpu[..., :1].shape)], dim=-1)  # [batch_size, N_depths, 4]
+                RGB_MAP = get_raw(POINTS_TIME_gpu, DISTs_gpu, BATCH_RAYs_D_gpu, BBOX_MODEL_gpu, MODEL_gpu, ENCODER_gpu)
+                img2mse = lambda x, y: torch.mean((x - y) ** 2)
+                img_loss = img2mse(RGB_MAP, TARGET_S_gpu)
+                loss = img_loss
+
+                for param in GRAD_vars:  # slightly faster than optimizer.zero_grad()
+                    param.grad = None
+                loss.backward()
+                OPTIMIZER.step()
+
+                loss_meter.update(loss.item())
+                if global_step % 100 == 0:
+                    tqdm.tqdm.write(f"[TRAIN] Iter: {global_step} Loss: {loss_meter.avg:.2g}")
+                    loss_meter.reset()
+
+                decay_rate = 0.1
+                decay_steps = lrate_decay
+                new_lrate = lrate * (decay_rate ** (global_step / decay_steps))
+                for param_group in OPTIMIZER.param_groups:
+                    param_group['lr'] = new_lrate
+                global_step += 1
+        os.makedirs("checkpoint", exist_ok=True)
+        path = os.path.join("checkpoint", '{:06d}.tar'.format(ITERATION))
+        os.makedirs(path, exist_ok=True)
+        torch.save({
+            'global_step': global_step,
+            'network_fn_state_dict': MODEL_gpu.state_dict(),
+            'embed_fn_state_dict': ENCODER_gpu.state_dict(),
+            'optimizer_state_dict': OPTIMIZER.state_dict(),
+        }, path)

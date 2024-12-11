@@ -1,59 +1,60 @@
-import nerfstudio.models.base_model
-import nerfstudio.cameras.cameras
-import nerfstudio.cameras.rays
-import nerfstudio.data.scene_box
-import nerfstudio.fields.base_field
-import nerfstudio.field_components.mlp
-import nerfstudio.field_components.field_heads
-
 import torch
-import numpy as np
-import dataclasses
-import typing
-
-import encoder
 
 
-class HyFluidNeRFModelConfig(nerfstudio.models.base_model.ModelConfig):
-    _target: typing.Type = dataclasses.field(default_factory=lambda: HyFluidNeRFModel)
-    num_coarse_samples: int = 64
-    num_importance_samples: int = 128
+class NeRFSmall(torch.nn.Module):
+    def __init__(self,
+                 num_layers=3,
+                 hidden_dim=64,
+                 geo_feat_dim=15,
+                 num_layers_color=2,
+                 hidden_dim_color=16,
+                 input_ch=3,
+                 ):
+        super(NeRFSmall, self).__init__()
 
+        self.input_ch = input_ch
+        self.rgb = torch.nn.Parameter(torch.tensor([0.0]))
 
-class HyFluidNeRFModel(nerfstudio.models.base_model.Model):
-    config: HyFluidNeRFModelConfig
+        # sigma network
+        self.num_layers = num_layers
+        self.hidden_dim = hidden_dim
+        self.geo_feat_dim = geo_feat_dim
 
-    def __init__(self, config: HyFluidNeRFModelConfig, scene_box: nerfstudio.data.scene_box.SceneBox, num_train_data: int):
-        super().__init__(config=config, scene_box=scene_box, num_train_data=num_train_data)
-        self.field_coarse = None
-        self.field_fine = None
+        sigma_net = []
+        for l in range(num_layers):
+            if l == 0:
+                in_dim = self.input_ch
+            else:
+                in_dim = hidden_dim
 
-        self.xyzt_encoder = encoder.HashEncoderHyFluid(
-            min_res=np.array([16, 16, 16, 16]),
-            max_res=np.array([256, 256, 256, 128]),
-            num_scales=16,
-            max_params=2 ** 19,
-        )
-        self.mlp_base = nerfstudio.field_components.mlp.MLP(
-            in_dim=self.xyzt_encoder.num_scales * self.xyzt_encoder.features_per_level,
-            num_layers=2,
-            layer_width=64,
-            out_dim=1,
-            out_activation=torch.nn.ReLU(),
-        )
+            if l == num_layers - 1:
+                out_dim = 1  # 1 sigma + 15 SH features for color
+            else:
+                out_dim = hidden_dim
 
-    def get_param_groups(self) -> typing.Dict[str, typing.List[torch.nn.Parameter]]:
-        param_groups = {}
-        assert self.field_coarse is not None
-        assert self.field_fine is not None
-        param_groups["fields"] = list(self.field_coarse.parameters()) + list(self.field_fine.parameters())
-        return param_groups
+            sigma_net.append(torch.nn.Linear(in_dim, out_dim, bias=False))
 
-    def get_outputs(self, ray_bundle: typing.Union[nerfstudio.cameras.rays.RayBundle, nerfstudio.cameras.cameras.Cameras]) -> typing.Dict[str, typing.Union[torch.Tensor, typing.List]]:
-        pass
+        self.sigma_net = torch.nn.ModuleList(sigma_net)
 
-    def get_loss_dict(self, outputs, batch, metrics_dict=None) -> typing.Dict[str, torch.Tensor]:
-        pass
+        self.color_net = []
+        for l in range(num_layers_color):
+            if l == 0:
+                in_dim = 1
+            else:
+                in_dim = hidden_dim_color
 
-    def get_image_metrics_and_images(self, outputs: typing.Dict[str, torch.Tensor], batch: typing.Dict[str, torch.Tensor]) -> typing.Tuple[typing.Dict[str, float], typing.Dict[str, torch.Tensor]]:
-        pass
+            if l == num_layers_color - 1:
+                out_dim = 1
+            else:
+                out_dim = hidden_dim_color
+
+            self.color_net.append(torch.nn.Linear(in_dim, out_dim, bias=True))
+
+    def forward(self, x):
+        h = x
+        for l in range(self.num_layers):
+            h = self.sigma_net[l](h)
+            h = torch.nn.functional.relu(h, inplace=True)
+
+        sigma = h
+        return sigma
