@@ -198,7 +198,7 @@ if __name__ == '__main__':
     # W_int = W_int // 2
 
     ############################## Load Encoder ##############################
-    ENCODER_gpu = encoder.HashEncoderNative(device=device)
+    ENCODER_gpu = encoder.HashEncoderNative(device=device).to(device)
     ############################## Load Encoder ##############################
 
     ############################## Load Model ##############################
@@ -235,7 +235,7 @@ if __name__ == '__main__':
     global_step = 1
     loss_meter = AverageMeter()
     GRAD_vars = list(MODEL_gpu.parameters()) + list(ENCODER_gpu.parameters())
-    for ITERATION in range(1, 100):
+    for ITERATION in range(1, 2):
         IMAGE_TRAIN_gpu, RAYs_gpu, RAY_IDX_gpu = do_resample_rays(H_int, W_int)
         for i in tqdm.trange(0, RAY_IDX_gpu.shape[0], batch_size):
             BATCH_RAYs_O_gpu, BATCH_RAYs_D_gpu, BATCH_RAYs_IDX_gpu = get_ray_batch(RAYs_gpu, RAY_IDX_gpu, i, i + batch_size)  # [batch_size, 3], [batch_size, 3], [batch_size]

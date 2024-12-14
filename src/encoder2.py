@@ -27,7 +27,7 @@ class HashEncoderNative(torch.nn.Module):
         self.scalings = torch.floor(min_res * self.growth_factor ** levels)
         self.hash_offset = levels * self.hash_table_size
 
-        self.hash_table = torch.rand(size=(self.hash_table_size * self.num_levels, self.features_per_level)) * 2 - 1
+        self.hash_table = torch.rand(size=(self.hash_table_size * self.num_levels, self.features_per_level), device=device) * 2 - 1
         self.hash_table *= 0.001
         self.hash_table = torch.nn.Parameter(self.hash_table)
 
