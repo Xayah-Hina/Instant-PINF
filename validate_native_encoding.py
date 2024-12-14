@@ -76,7 +76,6 @@ def get_raw2(POINTS_TIME: torch.Tensor, DISTs: torch.Tensor, RAYs_D_FLAT: torch.
 if __name__ == '__main__':
     os.environ["CUDA_VISIBLE_DEVICES"] = "1"
     device = torch.device("cuda")
-    ti.init(arch=ti.cuda, device_memory_GB=36.0)
     ###################################################################################
     pinf_data_test = np.load("data/test_dataset.npz")
     IMAGE_TEST_np = pinf_data_test['images_test']
