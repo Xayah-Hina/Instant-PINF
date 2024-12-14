@@ -1,9 +1,8 @@
 import numpy as np
-import taichi as ti
 import torch
 
 import src.bbox as bbox
-import src.encoder as encoder
+import src.encoder2 as encoder
 import src.model as model
 import src.radam as radam
 
@@ -199,18 +198,7 @@ if __name__ == '__main__':
     # W_int = W_int // 2
 
     ############################## Load Encoder ##############################
-    ti.init(arch=ti.cuda, device_memory_GB=36.0)
-    base_resolution = 16
-    base_resolution_t = 16
-    finest_resolution = 256
-    finest_resolution_t = 128
-    num_levels = 16
-    log2_hashmap_size = 19
-    ENCODER_gpu = encoder.HashEncoderHyFluid(
-        min_res=np.array([base_resolution, base_resolution, base_resolution, base_resolution_t]),
-        max_res=np.array([finest_resolution, finest_resolution, finest_resolution, finest_resolution_t]),
-        num_scales=num_levels,
-        max_params=2 ** log2_hashmap_size).to(device)
+    ENCODER_gpu = encoder.HashEncoderNative(device=device)
     ############################## Load Encoder ##############################
 
     ############################## Load Model ##############################
@@ -219,7 +207,7 @@ if __name__ == '__main__':
                                 geo_feat_dim=15,
                                 num_layers_color=2,
                                 hidden_dim_color=16,
-                                input_ch=ENCODER_gpu.num_scales * 2).to(device)
+                                input_ch=ENCODER_gpu.num_levels * 2).to(device)
     ############################## Load Model ##############################
 
     ############################## Load Optimizer ##############################
