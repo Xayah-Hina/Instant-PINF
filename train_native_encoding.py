@@ -8,21 +8,29 @@ import src.radam as radam
 
 
 def get_rays_np_continuous(H, W, c2w):
+    # Generate random offsets for pixel coordinates
+    random_offset = np.random.uniform(0, 1, size=(H, W, 2))
     i, j = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing='xy')
-    random_offset_i = np.random.uniform(0, 1, size=(H, W))
-    random_offset_j = np.random.uniform(0, 1, size=(H, W))
-    i = i + random_offset_i
-    j = j + random_offset_j
-    i = np.clip(i, 0, W - 1)
-    j = np.clip(j, 0, H - 1)
+    pixel_coords = np.stack((i, j), axis=-1) + random_offset
 
-    dirs = np.stack([(i - K[0][2]) / K[0][0], -(j - K[1][2]) / K[1][1], -np.ones_like(i)], -1)
-    # Rotate ray directions from camera frame to the world frame
-    rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3, :3],
-                    -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
-    # Translate camera frame's origin to the world frame. It is the origin of all rays.
-    rays_o = np.broadcast_to(c2w[:3, -1], np.shape(rays_d))
-    return rays_o, rays_d, i, j
+    # Clip pixel coordinates
+    pixel_coords[..., 0] = np.clip(pixel_coords[..., 0], 0, W - 1)
+    pixel_coords[..., 1] = np.clip(pixel_coords[..., 1], 0, H - 1)
+
+    # Compute ray directions in camera space
+    dirs = np.stack([
+        (pixel_coords[..., 0] - K[0][2]) / K[0][0],
+        -(pixel_coords[..., 1] - K[1][2]) / K[1][1],
+        -np.ones_like(pixel_coords[..., 0])
+    ], axis=-1)
+
+    # Transform ray directions to world space
+    rays_d = dirs @ c2w[:3, :3].T
+
+    # Compute ray origins in world space
+    rays_o = np.broadcast_to(c2w[:3, -1], rays_d.shape)
+
+    return rays_o, rays_d, pixel_coords[..., 0], pixel_coords[..., 1]
 
 
 def sample_bilinear(img, xy):
