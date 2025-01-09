@@ -1,7 +1,9 @@
 import numpy as np
 import torch
 from tqdm import tqdm, trange
-
+import os
+import imageio.v2 as imageio
+import json
 ############################################################################################################
 # from taichi_encoders.mgpcg import MGPCG_3
 
@@ -858,217 +860,6 @@ def advect_SL_particle(particle_pos, vel_world_prev, coord_3d_sim, dt, RK=2, y_s
     particle_vel_sim = F.grid_sample(vel_sim.permute(3, 2, 1, 0)[None], particle_pos_sampled[None, None, None], align_corners=True).permute([0, 2, 3, 4, 1]).flatten(0, 3)  # [N, 3]
     particle_pos_new = particle_pos + dt * bbox_model.sim2world_rot(particle_vel_sim)  # [N, 3]
     return particle_pos_new
-
-############################################################################################################
-# from load_scalarflow import load_pinf_frame_data
-import cv2
-import os
-import imageio.v2 as imageio
-import json
-
-trans_t = lambda t: torch.Tensor([
-    [1, 0, 0, 0],
-    [0, 1, 0, 0],
-    [0, 0, 1, t],
-    [0, 0, 0, 1]]).float()
-
-rot_phi = lambda phi: torch.Tensor([
-    [1, 0, 0, 0],
-    [0, np.cos(phi), -np.sin(phi), 0],
-    [0, np.sin(phi), np.cos(phi), 0],
-    [0, 0, 0, 1]]).float()
-
-rot_theta = lambda th: torch.Tensor([
-    [np.cos(th), 0, -np.sin(th), 0],
-    [0, 1, 0, 0],
-    [np.sin(th), 0, np.cos(th), 0],
-    [0, 0, 0, 1]]).float()
-
-
-def pose_spherical(theta, phi, radius, rotZ=True, wx=0.0, wy=0.0, wz=0.0):
-    # spherical, rotZ=True: theta rotate around Z; rotZ=False: theta rotate around Y
-    # wx,wy,wz, additional translation, normally the center coord.
-    c2w = trans_t(radius)
-    c2w = rot_phi(phi / 180. * np.pi) @ c2w
-    c2w = rot_theta(theta / 180. * np.pi) @ c2w
-    if rotZ:  # swap yz, and keep right-hand
-        c2w = torch.Tensor(np.array([[-1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]])) @ c2w
-
-    ct = torch.Tensor([
-        [1, 0, 0, wx],
-        [0, 1, 0, wy],
-        [0, 0, 1, wz],
-        [0, 0, 0, 1]]).float()
-    c2w = ct @ c2w
-
-    return c2w
-
-############################################################################################################
-from skimage.metrics import structural_similarity
-
-
-def advect_SL(q_grid, vel_world_prev, coord_3d_sim, dt, RK=2, y_start=48, proj_y=128,
-              use_project=False, project_solver=None, bbox_model=None, **kwargs):
-    """Advect a scalar quantity using a given velocity field.
-    Args:
-        q_grid: [X', Y', Z', C]
-        vel_world_prev: [X, Y, Z, 3]
-        coord_3d_sim: [X, Y, Z, 3]
-        dt: float
-        RK: int, number of Runge-Kutta steps
-        y_start: where to start at y-axis
-        proj_y: simulation domain resolution at y-axis
-        use_project: whether to use Poisson solver
-        project_solver: Poisson solver
-        bbox_model: bounding box model
-    Returns:
-        advected_quantity: [X, Y, Z, 1]
-        vel_world: [X, Y, Z, 3]
-    """
-    if RK == 1:
-        vel_world = vel_world_prev.clone()
-        vel_world[:, y_start:y_start + proj_y] = project_solver.Poisson(vel_world[:, y_start:y_start + proj_y]) if use_project else vel_world[:, y_start:y_start + proj_y]
-        vel_sim = bbox_model.world2sim_rot(vel_world)  # [X, Y, Z, 3]
-    elif RK == 2:
-        vel_world = vel_world_prev.clone()  # [X, Y, Z, 3]
-        vel_world[:, y_start:y_start + proj_y] = project_solver.Poisson(vel_world[:, y_start:y_start + proj_y]) if use_project else vel_world[:, y_start:y_start + proj_y]
-        # breakpoint()
-        vel_sim = bbox_model.world2sim_rot(vel_world)  # [X, Y, Z, 3]
-        coord_3d_sim_midpoint = coord_3d_sim - 0.5 * dt * vel_sim  # midpoint
-        midpoint_sampled = coord_3d_sim_midpoint * 2 - 1  # [X, Y, Z, 3]
-        vel_sim = F.grid_sample(vel_sim.permute(3, 2, 1, 0)[None], midpoint_sampled.permute(2, 1, 0, 3)[None], align_corners=True, padding_mode='zeros').squeeze(0).permute(3, 2, 1, 0)  # [X, Y, Z, 3]
-    else:
-        raise NotImplementedError
-    backtrace_coord = coord_3d_sim - dt * vel_sim  # [X, Y, Z, 3]
-    backtrace_coord_sampled = backtrace_coord * 2 - 1  # ranging [-1, 1]
-    q_grid = q_grid[None, ...].permute([0, 4, 3, 2, 1])  # [N, C, Z, Y, X] i.e., [N, C, D, H, W]
-    q_backtraced = F.grid_sample(q_grid, backtrace_coord_sampled.permute(2, 1, 0, 3)[None, ...], align_corners=True, padding_mode='zeros')  # [N, C, D, H, W]
-    q_backtraced = q_backtraced.squeeze(0).permute([3, 2, 1, 0])  # [X, Y, Z, C]
-    return q_backtraced, vel_world
-
-
-def advect_maccormack(q_grid, vel_world_prev, coord_3d_sim, dt, **kwargs):
-    """
-    Args:
-        q_grid: [X', Y', Z', C]
-        vel_world_prev: [X, Y, Z, 3]
-        coord_3d_sim: [X, Y, Z, 3]
-        dt: float
-    Returns:
-        advected_quantity: [X, Y, Z, C]
-        vel_world: [X, Y, Z, 3]
-    """
-    q_grid_next, _ = advect_SL(q_grid, vel_world_prev, coord_3d_sim, dt, **kwargs)
-    q_grid_back, vel_world = advect_SL(q_grid_next, vel_world_prev, coord_3d_sim, -dt, **kwargs)
-    q_advected = q_grid_next + (q_grid - q_grid_back) / 2
-    C = q_advected.shape[-1]
-    for i in range(C):
-        q_max, q_min = q_grid[..., i].max(), q_grid[..., i].min()
-        q_advected[..., i] = q_advected[..., i].clamp_(q_min, q_max)
-    return q_advected, vel_world
-
-
-from lpips import LPIPS
-
-
-def run_advect_den(render_poses, hwf, K, time_steps, savedir, gt_imgs, bbox_model, rx=128, ry=192, rz=128,
-                   save_fields=False, save_den=False, vort_particles=None, render=None, get_vel_der_fn=None, **render_kwargs):
-    H, W, focal = hwf
-    dt = time_steps[1] - time_steps[0]
-    render_kwargs.update(chunk=512 * 16)
-    psnrs = []
-    lpipss = []
-    ssims = []
-    lpips_net = LPIPS().cuda()  # input should be [-1, 1] or [0, 1] (normalize=True)
-
-    # construct simulation domain grid
-    xs, ys, zs = torch.meshgrid([torch.linspace(0, 1, rx), torch.linspace(0, 1, ry), torch.linspace(0, 1, rz)], indexing='ij')
-    coord_3d_sim = torch.stack([xs, ys, zs], dim=-1)  # [X, Y, Z, 3]
-    coord_3d_world = bbox_model.sim2world(coord_3d_sim)  # [X, Y, Z, 3]
-
-    # initialize density field
-    time_step = torch.ones_like(coord_3d_world[..., :1]) * time_steps[0]
-    coord_4d_world = torch.cat([coord_3d_world, time_step], dim=-1)  # [X, Y, Z, 4]
-    den = batchify_query(coord_4d_world, render_kwargs['network_query_fn'])  # [X, Y, Z, 1]
-    den_ori = den
-    vel = batchify_query(coord_4d_world, render_kwargs['network_query_fn_vel'])  # [X, Y, Z, 3]
-    vel_saved = vel
-    bbox_mask = bbox_model.insideMask(coord_3d_world[..., :3].reshape(-1, 3), to_float=False)
-    bbox_mask = bbox_mask.reshape(rx, ry, rz)
-
-    source_height = 0.25
-    y_start = int(source_height * ry)
-    print('y_start: {}'.format(y_start))
-    render_kwargs.update(y_start=y_start)
-    for i, c2w in enumerate(tqdm(render_poses)):
-        # update simulation den and source den
-        mask_to_sim = coord_3d_sim[..., 1] > source_height
-        if i > 0:
-            coord_4d_world[..., 3] = time_steps[i - 1]  # sample velocity at previous moment
-
-            vel = batchify_query(coord_4d_world, render_kwargs['network_query_fn_vel'])  # [X, Y, Z, 3]
-            vel_saved = vel
-            # advect vortex particles
-            if vort_particles is not None:
-                confinement_field = vort_particles(coord_3d_world, i)
-                print('Vortex energy over velocity: {:.2f}%'.format(torch.norm(confinement_field, dim=-1).pow(2).sum() / torch.norm(vel, dim=-1).pow(2).sum() * 100))
-            else:
-                confinement_field = torch.zeros_like(vel)
-
-            vel_confined = vel + confinement_field
-            den, vel = advect_maccormack(den, vel_confined, coord_3d_sim, dt, bbox_model=bbox_model, **render_kwargs)
-            den_ori = batchify_query(coord_4d_world, render_kwargs['network_query_fn'])  # [X, Y, Z, 1]
-            # zero grad for coord_4d_world
-            # coord_4d_world.grad = None
-            # coord_4d_world = coord_4d_world.detach()
-
-            coord_4d_world[..., 3] = time_steps[i]  # source density at current moment
-            den[~mask_to_sim] = batchify_query(coord_4d_world[~mask_to_sim], render_kwargs['network_query_fn'])
-            den[~bbox_mask] *= 0.0
-
-        if save_fields:
-            # save_fields_to_vti(vel.permute(2, 1, 0, 3).detach().cpu().numpy(),
-            #                    den.permute(2, 1, 0, 3).detach().cpu().numpy(),
-            #                    os.path.join(savedir, 'fields_{:03d}.vti'.format(i)))
-            np.save(os.path.join(savedir, 'den_{:03d}.npy'.format(i)), den.permute(2, 1, 0, 3).detach().cpu().numpy())
-            np.save(os.path.join(savedir, 'den_ori_{:03d}.npy'.format(i)), den_ori.permute(2, 1, 0, 3).detach().cpu().numpy())
-            np.save(os.path.join(savedir, 'vel_{:03d}.npy'.format(i)), vel_saved.permute(2, 1, 0, 3).detach().cpu().numpy())
-        if save_den:
-            # save_vdb(den[..., 0].detach().cpu().numpy(),
-            #          os.path.join(savedir, 'den_{:03d}.vdb'.format(i)))
-            # save npy files
-            np.save(os.path.join(savedir, 'den_{:03d}.npy'.format(i)), den[..., 0].detach().cpu().numpy())
-        rgb, _ = render(H, W, K, c2w=c2w[:3, :4], time_step=time_steps[i][None], render_grid=True, den_grid=den,
-                        **render_kwargs)
-        rgb8 = to8b(rgb.detach().cpu().numpy())
-        if gt_imgs is not None:
-            gt_img = torch.tensor(gt_imgs[i].squeeze(), dtype=torch.float32)  # [H, W, 3]
-            gt_img8 = to8b(gt_img.cpu().numpy())
-            gt_img = gt_img[90:960, 45:540]
-            rgb = rgb[90:960, 45:540]
-            lpips_value = lpips_net(rgb.permute(2, 0, 1), gt_img.permute(2, 0, 1), normalize=True).item()
-            p = -10. * np.log10(np.mean(np.square(rgb.detach().cpu().numpy() - gt_img.cpu().numpy())))
-            ssim_value = structural_similarity(gt_img.cpu().numpy(), rgb.cpu().numpy(), data_range=1.0, channel_axis=2)
-            lpipss.append(lpips_value)
-            psnrs.append(p)
-            ssims.append(ssim_value)
-            print(f'PSNR: {p:.4g}, SSIM: {ssim_value:.4g}, LPIPS: {lpips_value:.4g}')
-        imageio.imsave(os.path.join(savedir, 'rgb_{:03d}.png'.format(i)), rgb8)
-        imageio.imsave(os.path.join(savedir, 'gt_{:03d}.png'.format(i)), gt_img8)
-    merge_imgs(savedir, prefix='rgb_')
-    merge_imgs(savedir, prefix='gt_')
-
-    if gt_imgs is not None:
-        avg_psnr = sum(psnrs) / len(psnrs)
-        print(f"Avg PSNR over full simulation: ", avg_psnr)
-        avg_ssim = sum(ssims) / len(ssims)
-        print(f"Avg SSIM over full simulation: ", avg_ssim)
-        avg_lpips = sum(lpipss) / len(lpipss)
-        print(f"Avg LPIPS over full simulation: ", avg_lpips)
-        with open(os.path.join(savedir, "psnrs_{:0.2f}_ssim_{:.2g}_lpips_{:.2g}.json".format(avg_psnr, avg_ssim, avg_lpips)), "w") as fp:
-            json.dump(psnrs, fp)
-
-
 ############################################################################################################
 
 
@@ -1351,28 +1142,6 @@ def create_nerf(args):
     start = 0
     basedir = args.basedir
     expname = args.expname
-
-    ##########################
-
-    # Load checkpoints
-    if args.ft_path is not None and args.ft_path != 'None':
-        ckpts = [args.ft_path]
-    else:
-        ckpts = [os.path.join(basedir, expname, f) for f in sorted(os.listdir(os.path.join(basedir, expname))) if
-                 'tar' in f]
-
-    print('Found ckpts', ckpts)
-    if len(ckpts) > 0 and not args.no_reload:
-        ckpt_path = ckpts[-1]
-        print('Reloading from', ckpt_path)
-        ckpt = torch.load(ckpt_path)
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-
-        # Load model
-        model.load_state_dict(ckpt['network_fn_state_dict'])
-        embed_fn.load_state_dict(ckpt['embed_fn_state_dict'])
-
-    ##########################
 
     render_kwargs_train = {
         'network_query_fn': network_query_fn,
@@ -1828,15 +1597,6 @@ def train():
     expname = args.expname
 
     os.makedirs(os.path.join(basedir, expname), exist_ok=True)
-    f = os.path.join(basedir, expname, 'args.txt')
-    with open(f, 'w') as file:
-        for arg in sorted(vars(args)):
-            attr = getattr(args, arg)
-            file.write('{} = {}\n'.format(arg, attr))
-    if args.config is not None:
-        f = os.path.join(basedir, expname, 'config.txt')
-        with open(f, 'w') as file:
-            file.write(open(args.config, 'r').read())
 
     # Create nerf model
     bds_dict = {
@@ -2055,45 +1815,7 @@ def train():
         new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
         for param_group in optimizer_vel.param_groups:
             param_group['lr'] = new_lrate
-        ################################
-        # Rest is logging
-        if i % args.i_weights == 0:
-            os.makedirs(os.path.join(basedir, expname, 'den'), exist_ok=True)
-            path = os.path.join(basedir, expname, 'den', '{:06d}.tar'.format(i))
-            torch.save({
-                'global_step': global_step,
-                'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
-                'embed_fn_state_dict': render_kwargs_train['embed_fn'].state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-            }, path)
-            path = os.path.join(basedir, expname, '{:06d}.tar'.format(i))
-            torch.save({
-                'vel_network_fn_state_dict': render_kwargs_train_vel['network_fn'].state_dict(),
-                'vel_embed_fn_state_dict': render_kwargs_train_vel['embed_fn'].state_dict(),
-                'vel_optimizer_state_dict': optimizer_vel.state_dict(),
-            }, path)
 
-            print('Saved checkpoints at', path)
-
-        if i % args.i_video == 0 and i > 0:
-            # Turn on testing mode
-            testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
-            os.makedirs(testsavedir, exist_ok=True)
-
-            if i % (args.i_video) == 0:
-                print('Run advect density.')
-                with torch.no_grad():
-                    testsavedir = os.path.join(basedir, expname, 'run_advect_den_{:06d}'.format(i))
-                    os.makedirs(testsavedir, exist_ok=True)
-                    test_view_pose = torch.tensor(poses_test[0])
-                    N_timesteps = images_test.shape[0]
-                    test_timesteps = torch.arange(N_timesteps) / (N_timesteps - 1)
-                    test_view_poses = test_view_pose.unsqueeze(0).repeat(N_timesteps, 1, 1)
-                    render_kwargs_test.update(network_query_fn_vel=render_kwargs_test_vel['network_vel_fn'])
-                    run_advect_den(test_view_poses, hwf, K, time_steps=test_timesteps, savedir=testsavedir,
-                                   gt_imgs=images_test, bbox_model=bbox_model, rx=rx, ry=ry, rz=rz, y_start=y_start,
-                                   proj_y=proj_y, use_project=use_project, project_solver=project_solver, render=render,
-                                   **render_kwargs_test)
         if i % args.i_print == 0:
             tqdm.write(
                 f"[TRAIN] Iter: {i} Rec Loss:{loss_meter.avg:.2g} PSNR:{psnr_meter.avg:.4g} Flow Loss: {flow_loss_meter.avg:.2g}, "
