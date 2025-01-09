@@ -2047,8 +2047,10 @@ def train():
     # Load data
     images_train_, poses_train, hwf, render_poses, render_timesteps, voxel_tran, voxel_scale, near, far = \
         load_pinf_frame_data(args.datadir, args.half_res, split='train')
+    np.savez('train_dataset.npz', images_train=images_train_, poses_train=poses_train, hwf=hwf, render_poses=render_poses.cpu().numpy(), render_timesteps=render_timesteps, voxel_tran=voxel_tran, voxel_scale=voxel_scale, near=near, far=far)
     images_test, poses_test, hwf, render_poses, render_timesteps, voxel_tran, voxel_scale, near, far = \
         load_pinf_frame_data(args.datadir, args.half_res, split='test')
+    np.savez('test_dataset.npz', images_test=images_test, poses_test=poses_test, hwf=hwf, render_poses=render_poses.cpu().numpy(), render_timesteps=render_timesteps, voxel_tran=voxel_tran, voxel_scale=voxel_scale, near=near, far=far)
     global bbox_model
     voxel_tran_inv = np.linalg.inv(voxel_tran)
     bbox_model = BBox_Tool(voxel_tran_inv, voxel_scale)
