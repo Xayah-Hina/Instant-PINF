@@ -678,7 +678,7 @@ def sample_bilinear(img, xy):
 ############################################################################################################
 # from radam import RAdam
 
-class RAdam(torch.optim.optimizer.Optimizer):
+class RAdam(torch.optim.Optimizer):
 
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0, degenerated_to_sgd=False):
         if not 0.0 <= lr:
@@ -843,11 +843,11 @@ def advect_SL_particle(particle_pos, vel_world_prev, coord_3d_sim, dt, RK=2, y_s
     """
     if RK == 1:
         vel_world = vel_world_prev.clone()
-        vel_world[:, y_start:y_start+proj_y] = project_solver.Poisson(vel_world[:, y_start:y_start+proj_y]) if use_project else vel_world[:, y_start:y_start+proj_y]
+        vel_world[:, y_start:y_start + proj_y] = project_solver.Poisson(vel_world[:, y_start:y_start + proj_y]) if use_project else vel_world[:, y_start:y_start + proj_y]
         vel_sim = bbox_model.world2sim_rot(vel_world)  # [X, Y, Z, 3]
     elif RK == 2:
         vel_world = vel_world_prev.clone()  # [X, Y, Z, 3]
-        vel_world[:, y_start:y_start+proj_y] = project_solver.Poisson(vel_world[:, y_start:y_start+proj_y]) if use_project else vel_world[:, y_start:y_start+proj_y]
+        vel_world[:, y_start:y_start + proj_y] = project_solver.Poisson(vel_world[:, y_start:y_start + proj_y]) if use_project else vel_world[:, y_start:y_start + proj_y]
         vel_sim = bbox_model.world2sim_rot(vel_world)  # [X, Y, Z, 3]
         coord_3d_sim_midpoint = coord_3d_sim - 0.5 * dt * vel_sim  # midpoint
         midpoint_sampled = coord_3d_sim_midpoint * 2 - 1  # [X, Y, Z, 3]
@@ -858,6 +858,7 @@ def advect_SL_particle(particle_pos, vel_world_prev, coord_3d_sim, dt, RK=2, y_s
     particle_vel_sim = F.grid_sample(vel_sim.permute(3, 2, 1, 0)[None], particle_pos_sampled[None, None, None], align_corners=True).permute([0, 2, 3, 4, 1]).flatten(0, 3)  # [N, 3]
     particle_pos_new = particle_pos + dt * bbox_model.sim2world_rot(particle_vel_sim)  # [N, 3]
     return particle_pos_new
+
 
 def advect_maccormack_particle(particle_pos, vel_world_prev, coord_3d_sim, dt, **kwargs):
     """
@@ -874,6 +875,7 @@ def advect_maccormack_particle(particle_pos, vel_world_prev, coord_3d_sim, dt, *
     particle_pos_new = particle_pos_next + (particle_pos - particle_pos_back) / 2
     return particle_pos_new
 
+
 def get_particle_vel_der(particle_pos_3d_world, bbox_model, get_vel_der_fn, t):
     time_step = torch.ones_like(particle_pos_3d_world[..., :1]) * t
     particle_pos_4d_world = torch.cat([particle_pos_3d_world, time_step], dim=-1)  # [P, 4]
@@ -884,6 +886,7 @@ def get_particle_vel_der(particle_pos_3d_world, bbox_model, get_vel_der_fn, t):
     grad_u_world, grad_v_world, grad_w_world = jac[:, 0], jac[:, 1], jac[:, 2]  # [P, 3]
     return grad_u_world, grad_v_world, grad_w_world
 
+
 def stretch_vortex_particles(particle_dir, grad_u, grad_v, grad_w, dt):
     stretch_term = torch.cat([(particle_dir * grad_u).sum(dim=-1, keepdim=True),
                               (particle_dir * grad_v).sum(dim=-1, keepdim=True),
@@ -892,6 +895,7 @@ def stretch_vortex_particles(particle_dir, grad_u, grad_v, grad_w, dt):
     particle_int = torch.norm(particle_dir, dim=-1, keepdim=True)
     particle_dir = particle_dir / (particle_int + 1e-8)
     return particle_dir, particle_int
+
 
 def compute_curl(pts, get_vel_der_fn):
     """
@@ -912,17 +916,19 @@ def compute_curl(pts, get_vel_der_fn):
     curl = curl.view(list(pts_shape[:-1]) + [3])  # [..., 3]
     return curl
 
-def compute_curl_batch(pts, get_vel_der_fn, chunk=64*96*64):
+
+def compute_curl_batch(pts, get_vel_der_fn, chunk=64 * 96 * 64):
     pts_shape = pts.shape
     pts = pts.view(-1, pts_shape[-1])  # [N, 3]
     N = pts.shape[0]
     curls = []
     for i in range(0, N, chunk):
-        curl = compute_curl(pts[i:i+chunk], get_vel_der_fn)
+        curl = compute_curl(pts[i:i + chunk], get_vel_der_fn)
         curls.append(curl)
     curl = torch.cat(curls, dim=0)  # [N, 3]
     curl = curl.view(list(pts_shape[:-1]) + [3])  # [..., 3]
     return curl
+
 
 def generate_vort_trajectory_curl(time_steps, bbox_model, rx=128, ry=192, rz=128, get_vel_der_fn=None,
                                   P=100, N_sample=2 ** 10, den_net=None, **render_kwargs):
@@ -1182,11 +1188,11 @@ def advect_SL(q_grid, vel_world_prev, coord_3d_sim, dt, RK=2, y_start=48, proj_y
     """
     if RK == 1:
         vel_world = vel_world_prev.clone()
-        vel_world[:, y_start:y_start+proj_y] = project_solver.Poisson(vel_world[:, y_start:y_start+proj_y]) if use_project else vel_world[:, y_start:y_start+proj_y]
+        vel_world[:, y_start:y_start + proj_y] = project_solver.Poisson(vel_world[:, y_start:y_start + proj_y]) if use_project else vel_world[:, y_start:y_start + proj_y]
         vel_sim = bbox_model.world2sim_rot(vel_world)  # [X, Y, Z, 3]
     elif RK == 2:
         vel_world = vel_world_prev.clone()  # [X, Y, Z, 3]
-        vel_world[:, y_start:y_start+proj_y] = project_solver.Poisson(vel_world[:, y_start:y_start+proj_y]) if use_project else vel_world[:, y_start:y_start+proj_y]
+        vel_world[:, y_start:y_start + proj_y] = project_solver.Poisson(vel_world[:, y_start:y_start + proj_y]) if use_project else vel_world[:, y_start:y_start + proj_y]
         # breakpoint()
         vel_sim = bbox_model.world2sim_rot(vel_world)  # [X, Y, Z, 3]
         coord_3d_sim_midpoint = coord_3d_sim - 0.5 * dt * vel_sim  # midpoint
@@ -1200,6 +1206,7 @@ def advect_SL(q_grid, vel_world_prev, coord_3d_sim, dt, RK=2, y_start=48, proj_y
     q_backtraced = F.grid_sample(q_grid, backtrace_coord_sampled.permute(2, 1, 0, 3)[None, ...], align_corners=True, padding_mode='zeros')  # [N, C, D, H, W]
     q_backtraced = q_backtraced.squeeze(0).permute([3, 2, 1, 0])  # [X, Y, Z, C]
     return q_backtraced, vel_world
+
 
 def advect_maccormack(q_grid, vel_world_prev, coord_3d_sim, dt, **kwargs):
     """
@@ -1220,7 +1227,11 @@ def advect_maccormack(q_grid, vel_world_prev, coord_3d_sim, dt, **kwargs):
         q_max, q_min = q_grid[..., i].max(), q_grid[..., i].min()
         q_advected[..., i] = q_advected[..., i].clamp_(q_min, q_max)
     return q_advected, vel_world
+
+
 from lpips import LPIPS
+
+
 def run_advect_den(render_poses, hwf, K, time_steps, savedir, gt_imgs, bbox_model, rx=128, ry=192, rz=128,
                    save_fields=False, save_den=False, vort_particles=None, render=None, get_vel_der_fn=None, **render_kwargs):
     H, W, focal = hwf
@@ -1309,14 +1320,15 @@ def run_advect_den(render_poses, hwf, K, time_steps, savedir, gt_imgs, bbox_mode
     merge_imgs(savedir, prefix='gt_')
 
     if gt_imgs is not None:
-        avg_psnr = sum(psnrs)/len(psnrs)
+        avg_psnr = sum(psnrs) / len(psnrs)
         print(f"Avg PSNR over full simulation: ", avg_psnr)
-        avg_ssim = sum(ssims)/len(ssims)
+        avg_ssim = sum(ssims) / len(ssims)
         print(f"Avg SSIM over full simulation: ", avg_ssim)
-        avg_lpips = sum(lpipss)/len(lpipss)
+        avg_lpips = sum(lpipss) / len(lpipss)
         print(f"Avg LPIPS over full simulation: ", avg_lpips)
         with open(os.path.join(savedir, "psnrs_{:0.2f}_ssim_{:.2g}_lpips_{:.2g}.json".format(avg_psnr, avg_ssim, avg_lpips)), "w") as fp:
             json.dump(psnrs, fp)
+
 
 ############################################################################################################
 
@@ -1357,6 +1369,7 @@ class AverageMeter(object):
         self.count += n
         self.tot_count += n
         self.avg = self.sum / self.count
+
 
 ############################################################################################################
 import torch.nn.functional as F
@@ -2135,8 +2148,15 @@ def mean_squared_error(pred, exact):
 
 
 def train():
-    parser = config_parser()
-    args = parser.parse_args()
+    args_npz = np.load("args.npz", allow_pickle=True)
+    from types import SimpleNamespace
+    args = SimpleNamespace(**{
+        key: value.item() if isinstance(value, np.ndarray) and value.size == 1 else
+        value.tolist() if isinstance(value, np.ndarray) else
+        value
+        for key, value in args_npz.items()
+    })
+
     rx, ry, rz, proj_y, use_project, y_start = args.sim_res_x, args.sim_res_y, args.sim_res_z, args.proj_y, args.use_project, args.y_start
     boundary_types = ti.Matrix([[1, 1], [2, 1], [1, 1]], ti.i32)  # boundaries: 1 means Dirichlet, 2 means Neumann
     project_solver = MGPCG_3(boundary_types=boundary_types, N=[rx, proj_y, rz], base_level=3)
