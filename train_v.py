@@ -655,7 +655,7 @@ class AverageMeter(object):
 ############################################################################################################
 from torch.func import vmap, jacrev
 
-ti.init(arch=ti.cuda, device_memory_GB=36.0)
+ti.init(arch=ti.cuda, device_memory_GB=12.0)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 
