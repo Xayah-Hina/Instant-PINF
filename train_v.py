@@ -854,123 +854,6 @@ def render_path(render_poses, hwf, K, gt_imgs=None, savedir=None, time_steps=Non
     return
 
 
-def create_nerf(args):
-    """Instantiate NeRF's MLP model.
-    """
-    from src.encoder import HashEncoderHyFluid
-    # embed_fn, input_ch = get_encoder('hashgrid', input_dim=4, num_levels=args.num_levels, base_resolution=args.base_resolution,
-    #                                  finest_resolution=args.finest_resolution, log2_hashmap_size=args.log2_hashmap_size,)
-    max_res = np.array([args.finest_resolution, args.finest_resolution, args.finest_resolution, args.finest_resolution_t])
-    min_res = np.array([args.base_resolution, args.base_resolution, args.base_resolution, args.base_resolution_t])
-
-    embed_fn = HashEncoderHyFluid(max_res=max_res, min_res=min_res, num_scales=args.num_levels,
-                                  max_params=2 ** args.log2_hashmap_size)
-    input_ch = embed_fn.num_scales * 2  # default 2 params per scale
-    embedding_params = list(embed_fn.parameters())
-
-    model = mmodel.NeRFSmall(num_layers=2,
-                      hidden_dim=64,
-                      geo_feat_dim=15,
-                      num_layers_color=2,
-                      hidden_dim_color=16,
-                      input_ch=input_ch).to(device)
-    print(model)
-    print('Total number of trainable parameters in model: {}'.format(
-        sum([p.numel() for p in model.parameters() if p.requires_grad])))
-    print('Total number of parameters in embedding: {}'.format(
-        sum([p.numel() for p in embedding_params if p.requires_grad])))
-    grad_vars = list(model.parameters())
-
-    network_query_fn = lambda x: model(embed_fn(x))
-
-    # Create optimizer
-    optimizer = radam.RAdam([
-        {'params': grad_vars, 'weight_decay': 1e-6},
-        {'params': embedding_params, 'eps': 1e-15}
-    ], lr=args.lrate_den, betas=(0.9, 0.99))
-    grad_vars += list(embedding_params)
-    start = 0
-    basedir = args.basedir
-    expname = args.expname
-
-    render_kwargs_train = {
-        'network_query_fn': network_query_fn,
-        'perturb': args.perturb,
-        'N_samples': args.N_samples,
-        'network_fn': model,
-        'embed_fn': embed_fn,
-    }
-
-    render_kwargs_test = {k: render_kwargs_train[k] for k in render_kwargs_train}
-    render_kwargs_test['perturb'] = False
-
-    return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
-
-
-def create_vel_nerf(args):
-    """Instantiate NeRF's MLP model.
-    """
-    from src.encoder import HashEncoderHyFluid
-    max_res = np.array([args.finest_resolution_v, args.finest_resolution_v, args.finest_resolution_v, args.finest_resolution_v_t])
-    min_res = np.array([args.base_resolution_v, args.base_resolution_v, args.base_resolution_v, args.base_resolution_v_t])
-
-    embed_fn = HashEncoderHyFluid(max_res=max_res, min_res=min_res, num_scales=args.num_levels,
-                                  max_params=2 ** args.log2_hashmap_size)
-    input_ch = embed_fn.num_scales * 2  # default 2 params per scale
-    embedding_params = list(embed_fn.parameters())
-
-    model = mmodel.NeRFSmallPotential(num_layers=args.vel_num_layers,
-                               hidden_dim=64,
-                               geo_feat_dim=15,
-                               num_layers_color=2,
-                               hidden_dim_color=16,
-                               input_ch=input_ch,
-                               use_f=args.use_f).to(device)
-    grad_vars = list(model.parameters())
-    print(model)
-    print('Total number of trainable parameters in model: {}'.format(
-        sum([p.numel() for p in model.parameters() if p.requires_grad])))
-    print('Total number of parameters in embedding: {}'.format(
-        sum([p.numel() for p in embedding_params if p.requires_grad])))
-
-    # network_query_fn = lambda x: model(embed_fn(x))
-    def network_vel_fn(x):
-        with torch.enable_grad():
-            if not args.no_vel_der:
-                h = embed_fn(x)
-                v, f = model(h)
-                return v, f, h
-            else:
-                v, f = model(embed_fn(x))
-                return v, f
-
-    # Create optimizer
-    optimizer = torch.optim.RAdam([
-        {'params': grad_vars, 'weight_decay': 1e-6},
-        {'params': embedding_params, 'eps': 1e-15}
-    ], lr=args.lrate, betas=(0.9, 0.99))
-    grad_vars += list(embedding_params)
-    start = 0
-    basedir = args.basedir
-    expname = args.expname
-
-    ##########################
-
-    render_kwargs_train = {
-        'network_vel_fn': network_vel_fn,
-        'perturb': args.perturb,
-        'N_samples': args.N_samples,
-
-        'network_fn': model,
-        'embed_fn': embed_fn,
-    }
-
-    render_kwargs_test = {k: render_kwargs_train[k] for k in render_kwargs_train}
-    render_kwargs_test['perturb'] = False
-
-    return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
-
-
 def raw2outputs(raw, z_vals, rays_d, learned_rgb=None, render_vel=False):
     """Transforms model's predictions to semantically meaningful values.
     Args:
@@ -1324,10 +1207,122 @@ def train():
         'near': near,
         'far': far,
     }
-    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
+
+    # Create nerf model
+    ############################
+    from src.encoder import HashEncoderHyFluid
+    # embed_fn, input_ch = get_encoder('hashgrid', input_dim=4, num_levels=args.num_levels, base_resolution=args.base_resolution,
+    #                                  finest_resolution=args.finest_resolution, log2_hashmap_size=args.log2_hashmap_size,)
+    max_res = np.array([args.finest_resolution, args.finest_resolution, args.finest_resolution, args.finest_resolution_t])
+    min_res = np.array([args.base_resolution, args.base_resolution, args.base_resolution, args.base_resolution_t])
+
+    embed_fn = HashEncoderHyFluid(max_res=max_res, min_res=min_res, num_scales=args.num_levels,
+                                  max_params=2 ** args.log2_hashmap_size)
+    input_ch = embed_fn.num_scales * 2  # default 2 params per scale
+    embedding_params = list(embed_fn.parameters())
+
+    model = mmodel.NeRFSmall(num_layers=2,
+                             hidden_dim=64,
+                             geo_feat_dim=15,
+                             num_layers_color=2,
+                             hidden_dim_color=16,
+                             input_ch=input_ch).to(device)
+    print(model)
+    print('Total number of trainable parameters in model: {}'.format(
+        sum([p.numel() for p in model.parameters() if p.requires_grad])))
+    print('Total number of parameters in embedding: {}'.format(
+        sum([p.numel() for p in embedding_params if p.requires_grad])))
+    grad_vars = list(model.parameters())
+
+    network_query_fn = lambda x: model(embed_fn(x))
+
+    # Create optimizer
+    optimizer = radam.RAdam([
+        {'params': grad_vars, 'weight_decay': 1e-6},
+        {'params': embedding_params, 'eps': 1e-15}
+    ], lr=args.lrate_den, betas=(0.9, 0.99))
+    grad_vars += list(embedding_params)
+    start = 0
+    basedir = args.basedir
+    expname = args.expname
+
+    render_kwargs_train = {
+        'network_query_fn': network_query_fn,
+        'perturb': args.perturb,
+        'N_samples': args.N_samples,
+        'network_fn': model,
+        'embed_fn': embed_fn,
+    }
+
+    render_kwargs_test = {k: render_kwargs_train[k] for k in render_kwargs_train}
+    render_kwargs_test['perturb'] = False
+
+    ############################
+
     render_kwargs_train.update(bds_dict)
     render_kwargs_test.update(bds_dict)
-    render_kwargs_train_vel, render_kwargs_test_vel, start_vel, grad_vars_vel, optimizer_vel = create_vel_nerf(args)
+
+    # Create nerf model
+    ############################
+    max_res_v = np.array([args.finest_resolution_v, args.finest_resolution_v, args.finest_resolution_v, args.finest_resolution_v_t])
+    min_res_v = np.array([args.base_resolution_v, args.base_resolution_v, args.base_resolution_v, args.base_resolution_v_t])
+
+    embed_fn_v = HashEncoderHyFluid(max_res=max_res_v, min_res=min_res_v, num_scales=args.num_levels,
+                                    max_params=2 ** args.log2_hashmap_size)
+    input_ch_v = embed_fn_v.num_scales * 2  # default 2 params per scale
+    embedding_params_v = list(embed_fn_v.parameters())
+
+    model_v = mmodel.NeRFSmallPotential(num_layers=args.vel_num_layers,
+                                        hidden_dim=64,
+                                        geo_feat_dim=15,
+                                        num_layers_color=2,
+                                        hidden_dim_color=16,
+                                        input_ch=input_ch_v,
+                                        use_f=args.use_f).to(device)
+    grad_vars_vel = list(model_v.parameters())
+    print(model_v)
+    print('Total number of trainable parameters in model: {}'.format(
+        sum([p.numel() for p in model_v.parameters() if p.requires_grad])))
+    print('Total number of parameters in embedding: {}'.format(
+        sum([p.numel() for p in embedding_params_v if p.requires_grad])))
+
+    # network_query_fn = lambda x: model(embed_fn(x))
+    def network_vel_fn(x):
+        with torch.enable_grad():
+            if not args.no_vel_der:
+                h = embed_fn_v(x)
+                v, f = model_v(h)
+                return v, f, h
+            else:
+                v, f = model_v(embed_fn_v(x))
+                return v, f
+
+    # Create optimizer
+    optimizer_vel = torch.optim.RAdam([
+        {'params': grad_vars_vel, 'weight_decay': 1e-6},
+        {'params': embedding_params_v, 'eps': 1e-15}
+    ], lr=args.lrate, betas=(0.9, 0.99))
+    grad_vars_vel += list(embedding_params_v)
+    start_vel = 0
+    basedir = args.basedir
+    expname = args.expname
+
+    ##########################
+
+    render_kwargs_train_vel = {
+        'network_vel_fn': network_vel_fn,
+        'perturb': args.perturb,
+        'N_samples': args.N_samples,
+
+        'network_fn': model_v,
+        'embed_fn': embed_fn_v,
+    }
+
+    render_kwargs_test_vel = {k: render_kwargs_train_vel[k] for k in render_kwargs_train_vel}
+    render_kwargs_test_vel['perturb'] = False
+
+    ############################
+
     render_kwargs_train_vel.update(bds_dict)
     render_kwargs_test_vel.update(bds_dict)
     global_step = start
