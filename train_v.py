@@ -956,33 +956,6 @@ def create_vel_nerf(args):
 
     ##########################
 
-    # Load checkpoints
-    if args.ft_v_path is not None and args.ft_v_path != 'None':
-        ckpts = [args.ft_v_path]
-    else:
-        ckpts = [os.path.join(basedir, expname, f) for f in sorted(os.listdir(os.path.join(basedir, expname))) if
-                 'tar' in f]
-
-    print('Found ckpts', ckpts)
-    if len(ckpts) > 0 and not args.no_reload:
-        ckpt_path = ckpts[-1]
-        print('Reloading from', ckpt_path)
-        ckpt = torch.load(ckpt_path)
-        print(ckpt['vel_network_fn_state_dict'].keys())
-        # update model
-        model_dict = model.state_dict()
-        pretrained_dict = ckpt['vel_network_fn_state_dict']
-        pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
-        model_dict.update(pretrained_dict)
-        model.load_state_dict(model_dict)
-        print("Updated parameters:{}/{}".format(len(pretrained_dict), len(model_dict)))
-        # model.load_state_dict(ckpt['vel_network_fn_state_dict'])
-        embed_fn.load_state_dict(ckpt['vel_embed_fn_state_dict'])
-
-        optimizer.load_state_dict(ckpt['vel_optimizer_state_dict'])
-
-    ##########################
-
     render_kwargs_train = {
         'network_vel_fn': network_vel_fn,
         'perturb': args.perturb,
