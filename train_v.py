@@ -1,3 +1,6 @@
+import src.radam as radam
+import src.model as mmodel
+
 import numpy as np
 import torch
 from tqdm import tqdm, trange
@@ -432,125 +435,6 @@ class MGPCG_3(MGPCG):
 
 ############################################################################################################
 
-############################################################################################################
-# from run_nerf_helpers import NeRFSmall, NeRFSmallPotential, save_quiver_plot, get_rays_np, get_rays, get_rays_np_continuous, to8b, batchify_query, sample_bilinear, img2mse, mse2psnr
-
-# Small NeRF for Hash embeddings
-class NeRFSmall(torch.nn.Module):
-    def __init__(self,
-                 num_layers=3,
-                 hidden_dim=64,
-                 geo_feat_dim=15,
-                 num_layers_color=2,
-                 hidden_dim_color=16,
-                 input_ch=3,
-                 ):
-        super(NeRFSmall, self).__init__()
-
-        self.input_ch = input_ch
-        self.rgb = torch.nn.Parameter(torch.tensor([0.0]))
-
-        # sigma network
-        self.num_layers = num_layers
-        self.hidden_dim = hidden_dim
-        self.geo_feat_dim = geo_feat_dim
-
-        sigma_net = []
-        for l in range(num_layers):
-            if l == 0:
-                in_dim = self.input_ch
-            else:
-                in_dim = hidden_dim
-
-            if l == num_layers - 1:
-                out_dim = 1  # 1 sigma + 15 SH features for color
-            else:
-                out_dim = hidden_dim
-
-            sigma_net.append(torch.nn.Linear(in_dim, out_dim, bias=False))
-
-        self.sigma_net = torch.nn.ModuleList(sigma_net)
-
-        self.color_net = []
-        for l in range(num_layers_color):
-            if l == 0:
-                in_dim = 1
-            else:
-                in_dim = hidden_dim_color
-
-            if l == num_layers_color - 1:
-                out_dim = 1
-            else:
-                out_dim = hidden_dim_color
-
-            self.color_net.append(torch.nn.Linear(in_dim, out_dim, bias=True))
-
-    def forward(self, x):
-        h = x
-        for l in range(self.num_layers):
-            h = self.sigma_net[l](h)
-            h = F.relu(h, inplace=True)
-
-        sigma = h
-        return sigma
-
-
-class NeRFSmallPotential(torch.nn.Module):
-    def __init__(self,
-                 num_layers=3,
-                 hidden_dim=64,
-                 geo_feat_dim=15,
-                 num_layers_color=2,
-                 hidden_dim_color=16,
-                 input_ch=3,
-                 use_f=False
-                 ):
-        super(NeRFSmallPotential, self).__init__()
-
-        self.input_ch = input_ch
-        self.rgb = torch.nn.Parameter(torch.tensor([0.0]))
-
-        # sigma network
-        self.num_layers = num_layers
-        self.hidden_dim = hidden_dim
-        self.geo_feat_dim = geo_feat_dim
-
-        sigma_net = []
-        for l in range(num_layers):
-            if l == 0:
-                in_dim = self.input_ch
-            else:
-                in_dim = hidden_dim
-
-            if l == num_layers - 1:
-                out_dim = hidden_dim  # 1 sigma + 15 SH features for color
-            else:
-                out_dim = hidden_dim
-
-            sigma_net.append(torch.nn.Linear(in_dim, out_dim, bias=False))
-        self.sigma_net = torch.nn.ModuleList(sigma_net)
-        self.out = torch.nn.Linear(hidden_dim, 3, bias=True)
-        self.use_f = use_f
-        if use_f:
-            self.out_f = torch.nn.Linear(hidden_dim, hidden_dim, bias=True)
-            self.out_f2 = torch.nn.Linear(hidden_dim, 3, bias=True)
-
-    def forward(self, x):
-        h = x
-        for l in range(self.num_layers):
-            h = self.sigma_net[l](h)
-            h = F.relu(h, True)
-
-        v = self.out(h)
-        if self.use_f:
-            f = self.out_f(h)
-            f = F.relu(f, True)
-            f = self.out_f2(f)
-        else:
-            f = v * 0
-        return v, f
-
-
 def save_quiver_plot(u, v, res, save_path, scale=0.00000002):
     """
     Args:
@@ -676,105 +560,6 @@ def sample_bilinear(img, xy):
 
 ############################################################################################################
 
-
-############################################################################################################
-# from radam import RAdam
-
-class RAdam(torch.optim.Optimizer):
-
-    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0, degenerated_to_sgd=False):
-        if not 0.0 <= lr:
-            raise ValueError("Invalid learning rate: {}".format(lr))
-        if not 0.0 <= eps:
-            raise ValueError("Invalid epsilon value: {}".format(eps))
-        if not 0.0 <= betas[0] < 1.0:
-            raise ValueError("Invalid beta parameter at index 0: {}".format(betas[0]))
-        if not 0.0 <= betas[1] < 1.0:
-            raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
-
-        self.degenerated_to_sgd = degenerated_to_sgd
-        if isinstance(params, (list, tuple)) and len(params) > 0 and isinstance(params[0], dict):
-            for param in params:
-                if 'betas' in param and (param['betas'][0] != betas[0] or param['betas'][1] != betas[1]):
-                    param['buffer'] = [[None, None, None] for _ in range(10)]
-        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay, buffer=[[None, None, None] for _ in range(10)])
-        super(RAdam, self).__init__(params, defaults)
-
-    def __setstate__(self, state):
-        super(RAdam, self).__setstate__(state)
-
-    def step(self, closure=None):
-
-        loss = None
-        if closure is not None:
-            loss = closure()
-
-        for group in self.param_groups:
-
-            for p in group['params']:
-                if p.grad is None:
-                    continue
-                grad = p.grad.data.float()
-                if grad.is_sparse:
-                    raise RuntimeError('RAdam does not support sparse gradients')
-
-                p_data_fp32 = p.data.float()
-
-                state = self.state[p]
-
-                if len(state) == 0:
-                    state['step'] = 0
-                    state['exp_avg'] = torch.zeros_like(p_data_fp32)
-                    state['exp_avg_sq'] = torch.zeros_like(p_data_fp32)
-                else:
-                    state['exp_avg'] = state['exp_avg'].type_as(p_data_fp32)
-                    state['exp_avg_sq'] = state['exp_avg_sq'].type_as(p_data_fp32)
-
-                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
-                beta1, beta2 = group['betas']
-
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
-                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
-
-                state['step'] += 1
-                buffered = group['buffer'][int(state['step'] % 10)]
-                if state['step'] == buffered[0]:
-                    N_sma, step_size = buffered[1], buffered[2]
-                else:
-                    buffered[0] = state['step']
-                    beta2_t = beta2 ** state['step']
-                    N_sma_max = 2 / (1 - beta2) - 1
-                    N_sma = N_sma_max - 2 * state['step'] * beta2_t / (1 - beta2_t)
-                    buffered[1] = N_sma
-
-                    # more conservative since it's an approximated value
-                    if N_sma >= 5:
-                        step_size = math.sqrt((1 - beta2_t) * (N_sma - 4) / (N_sma_max - 4) * (N_sma - 2) / N_sma * N_sma_max / (N_sma_max - 2)) / (1 - beta1 ** state['step'])
-                    elif self.degenerated_to_sgd:
-                        step_size = 1.0 / (1 - beta1 ** state['step'])
-                    else:
-                        step_size = -1
-                    buffered[2] = step_size
-
-                # more conservative since it's an approximated value
-                if N_sma >= 5:
-                    if group['weight_decay'] != 0:
-                        p_data_fp32.add_(p_data_fp32, alpha=-group['weight_decay'] * group['lr'])
-                    denom = exp_avg_sq.sqrt().add_(group['eps'])
-                    p_data_fp32.addcdiv_(exp_avg, denom, value=-step_size * group['lr'])
-                    p.data.copy_(p_data_fp32)
-                elif step_size > 0:
-                    if group['weight_decay'] != 0:
-                        p_data_fp32.add_(p_data_fp32, alpha=-group['weight_decay'] * group['lr'])
-                    p_data_fp32.add_(exp_avg, alpha=-step_size * group['lr'])
-                    p.data.copy_(p_data_fp32)
-
-        return loss
-
-
-############################################################################################################
-
-
 def pos_world2smoke(Pworld, w2s, scale_vector):
     pos_rot = torch.sum(Pworld[..., None, :] * (w2s[:3, :3]), -1)  # 4.world to 3.target
     pos_off = (w2s[:3, -1]).expand(pos_rot.shape)  # 4.world to 3.target
@@ -826,40 +611,6 @@ class BBox_Tool(object):
         return self.isInside(inputs_pts).to(torch.float) if to_float else self.isInside(inputs_pts)
 
 
-def advect_SL_particle(particle_pos, vel_world_prev, coord_3d_sim, dt, RK=2, y_start=48, proj_y=128,
-                       use_project=False, project_solver=None, bbox_model=None, **kwargs):
-    """Advect a scalar quantity using a given velocity field.
-    Args:
-        particle_pos: [N, 3], in world coordinate domain
-        vel_world_prev: [X, Y, Z, 3]
-        coord_3d_sim: [X, Y, Z, 3]
-        dt: float
-        RK: int, number of Runge-Kutta steps
-        y_start: where to start at y-axis
-        proj_y: simulation domain resolution at y-axis
-        use_project: whether to use Poisson solver
-        project_solver: Poisson solver
-        bbox_model: bounding box model
-    Returns:
-        new_particle_pos: [N, 3], in simulation coordinate domain
-    """
-    if RK == 1:
-        vel_world = vel_world_prev.clone()
-        vel_world[:, y_start:y_start + proj_y] = project_solver.Poisson(vel_world[:, y_start:y_start + proj_y]) if use_project else vel_world[:, y_start:y_start + proj_y]
-        vel_sim = bbox_model.world2sim_rot(vel_world)  # [X, Y, Z, 3]
-    elif RK == 2:
-        vel_world = vel_world_prev.clone()  # [X, Y, Z, 3]
-        vel_world[:, y_start:y_start + proj_y] = project_solver.Poisson(vel_world[:, y_start:y_start + proj_y]) if use_project else vel_world[:, y_start:y_start + proj_y]
-        vel_sim = bbox_model.world2sim_rot(vel_world)  # [X, Y, Z, 3]
-        coord_3d_sim_midpoint = coord_3d_sim - 0.5 * dt * vel_sim  # midpoint
-        midpoint_sampled = coord_3d_sim_midpoint * 2 - 1  # [X, Y, Z, 3]
-        vel_sim = F.grid_sample(vel_sim.permute(3, 2, 1, 0)[None], midpoint_sampled.permute(2, 1, 0, 3)[None], align_corners=True).squeeze(0).permute(3, 2, 1, 0)  # [X, Y, Z, 3]
-    else:
-        raise NotImplementedError
-    particle_pos_sampled = bbox_model.world2sim(particle_pos) * 2 - 1  # ranging [-1, 1]
-    particle_vel_sim = F.grid_sample(vel_sim.permute(3, 2, 1, 0)[None], particle_pos_sampled[None, None, None], align_corners=True).permute([0, 2, 3, 4, 1]).flatten(0, 3)  # [N, 3]
-    particle_pos_new = particle_pos + dt * bbox_model.sim2world_rot(particle_vel_sim)  # [N, 3]
-    return particle_pos_new
 ############################################################################################################
 
 
@@ -902,10 +653,9 @@ class AverageMeter(object):
 
 
 ############################################################################################################
-import torch.nn.functional as F
 from torch.func import vmap, jacrev
 
-ti.init(arch=ti.cuda, device_memory_GB=12.0)
+ti.init(arch=ti.cuda, device_memory_GB=36.0)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 
@@ -1118,7 +868,7 @@ def create_nerf(args):
     input_ch = embed_fn.num_scales * 2  # default 2 params per scale
     embedding_params = list(embed_fn.parameters())
 
-    model = NeRFSmall(num_layers=2,
+    model = mmodel.NeRFSmall(num_layers=2,
                       hidden_dim=64,
                       geo_feat_dim=15,
                       num_layers_color=2,
@@ -1134,7 +884,7 @@ def create_nerf(args):
     network_query_fn = lambda x: model(embed_fn(x))
 
     # Create optimizer
-    optimizer = RAdam([
+    optimizer = radam.RAdam([
         {'params': grad_vars, 'weight_decay': 1e-6},
         {'params': embedding_params, 'eps': 1e-15}
     ], lr=args.lrate_den, betas=(0.9, 0.99))
@@ -1169,7 +919,7 @@ def create_vel_nerf(args):
     input_ch = embed_fn.num_scales * 2  # default 2 params per scale
     embedding_params = list(embed_fn.parameters())
 
-    model = NeRFSmallPotential(num_layers=args.vel_num_layers,
+    model = mmodel.NeRFSmallPotential(num_layers=args.vel_num_layers,
                                hidden_dim=64,
                                geo_feat_dim=15,
                                num_layers_color=2,
@@ -1261,7 +1011,7 @@ def raw2outputs(raw, z_vals, rays_d, learned_rgb=None, render_vel=False):
         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
         depth_map: [num_rays]. Estimated distance to object.
     """
-    raw2alpha = lambda raw, dists, act_fn=F.relu: 1. - torch.exp(-act_fn(raw) * dists)
+    raw2alpha = lambda raw, dists, act_fn=torch.nn.functional.relu: 1. - torch.exp(-act_fn(raw) * dists)
 
     dists = z_vals[..., 1:] - z_vals[..., :-1]
     dists = torch.cat([dists, torch.tensor([0.1]).expand(dists[..., :1].shape)], -1)  # [N_rays, N_samples]
@@ -1403,7 +1153,7 @@ def render_rays(ray_batch,
         pts_sim = bbox_model.world2sim(pts_world)
         pts_sample = pts_sim * 2 - 1  # ranging [-1, 1]
         den_grid = den_grid[None, ...].permute([0, 4, 3, 2, 1])  # [N, 1, Z, Y, X] i.e., [N, 1, D, H, W]
-        den_sampled = F.grid_sample(den_grid, pts_sample[None, ..., None, None, :], align_corners=True)
+        den_sampled = torch.nn.functional.grid_sample(den_grid, pts_sample[None, ..., None, None, :], align_corners=True)
 
         raw_flat_den[bbox_mask] = den_sampled.reshape(-1, 1)
         raw_den = raw_flat_den.reshape(N_rays, N_samples, out_dim)
@@ -1411,7 +1161,7 @@ def render_rays(ray_batch,
         if color_grid is not None:
             raw_flat_rgb = torch.zeros([N_rays, N_samples, 3]).reshape(-1, 3)
             color_grid = color_grid[None, ...].permute([0, 4, 3, 2, 1])  # [N, 1, Z, Y, X] i.e., [N, 3, D, H, W]
-            color_sampled = F.grid_sample(color_grid, pts_sample[None, ..., None, None, :], align_corners=True)
+            color_sampled = torch.nn.functional.grid_sample(color_grid, pts_sample[None, ..., None, None, :], align_corners=True)
             raw_flat_rgb[bbox_mask] = color_sampled.reshape(-1, 1)
             raw_rgb = raw_flat_rgb.reshape(N_rays, N_samples, 3)
         else:
@@ -1574,8 +1324,6 @@ def train():
     near = pinf_data_test['near'].item()
     far = pinf_data_test['far'].item()
 
-
-
     global bbox_model
     voxel_tran_inv = np.linalg.inv(voxel_tran)
     bbox_model = BBox_Tool(voxel_tran_inv, voxel_scale)
@@ -1612,8 +1360,6 @@ def train():
     global_step = start
     # Move testing data to GPU
     render_poses = torch.Tensor(render_poses).to(device)
-
-
 
     # Prepare raybatch tensor if batching random rays
     N_rand = args.N_rand
@@ -1871,6 +1617,5 @@ def train():
 
 if __name__ == '__main__':
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
-    import ipdb
 
     train()
