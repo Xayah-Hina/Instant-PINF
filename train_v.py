@@ -5,7 +5,6 @@ import numpy as np
 import torch
 from tqdm import tqdm, trange
 import os
-import imageio.v2 as imageio
 import json
 ############################################################################################################
 # from taichi_encoders.mgpcg import MGPCG_3
@@ -812,48 +811,6 @@ def get_velocity_and_derivitives(pts,
     return ret_list
 
 
-def render_path(render_poses, hwf, K, gt_imgs=None, savedir=None, time_steps=None, vel_scale=0.01, sim_step=5, **render_kwargs):
-    H, W, focal = hwf
-    dt = time_steps[1] - time_steps[0]
-    render_kwargs.update(dt=dt)
-    render_kwargs.update(chunk=512 * 16)
-    psnrs = []
-
-    for i, c2w in enumerate(tqdm(render_poses)):
-        vel_map, _ = render(H, W, K, c2w=c2w[:3, :4], time_step=time_steps[i][None], render_vel=True, **render_kwargs)
-        vel_map = vel_map.cpu().numpy()  # [H, W, 2]
-        # finite difference has issues with boundary because those are not seen during training. Remove those.
-        vel_map[0], vel_map[-1], vel_map[:, 0], vel_map[:, -1] = 0, 0, 0, 0
-
-        rgb, _ = render(H, W, K, c2w=c2w[:3, :4], time_step=time_steps[i][None], render_sim=True, sim_step=sim_step, **render_kwargs)
-        rgb8 = to8b(rgb.cpu().numpy())
-        if gt_imgs is not None:
-            try:
-                gt_img = gt_imgs[i].cpu().numpy()
-            except:
-                gt_img = gt_imgs[i]
-            p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_img)))
-            print(f'PSNR: {p:.4g}')
-            psnrs.append(p)
-
-        if savedir is not None:
-            save_quiver_plot(vel_map[..., 0], vel_map[..., 1], 64, os.path.join(savedir, 'vel_{:03d}.png'.format(i)),
-                             scale=vel_scale)
-            imageio.imsave(os.path.join(savedir, 'rgb_{:03d}.png'.format(i)), rgb8)
-
-    if savedir is not None:
-        merge_imgs(savedir, prefix='vel_')
-        merge_imgs(savedir, prefix='rgb_')
-
-    if gt_imgs is not None:
-        avg_psnr = sum(psnrs) / len(psnrs)
-        print(f"Avg PSNR over {sim_step}-step simulation: ", avg_psnr)
-        with open(os.path.join(savedir, "{}step_psnrs_avg{:0.2f}.json".format(sim_step, avg_psnr)), "w") as fp:
-            json.dump(psnrs, fp)
-
-    return
-
-
 def raw2outputs(raw, z_vals, rays_d, learned_rgb=None, render_vel=False):
     """Transforms model's predictions to semantically meaningful values.
     Args:
@@ -956,103 +913,35 @@ def render_rays(ray_batch,
         bbox_mask[0] = True  # in case zero rays are inside the bbox
     pts = pts_flat[bbox_mask]
     ret = {}
-    if render_vel:
-        out_dim = 3
-        raw_flat_vel = torch.zeros([N_rays, N_samples, out_dim]).reshape(-1, out_dim)
-        raw_flat_vel[bbox_mask] = network_query_fn_vel(pts)[0]  # raw_vel
-        raw_vel = raw_flat_vel.reshape(N_rays, N_samples, out_dim)
-        out_dim = 1
-        raw_flat_den = torch.zeros([N_rays, N_samples, out_dim]).reshape(-1, out_dim)
-        raw_flat_den[bbox_mask] = network_query_fn(pts)  # raw_den
-        raw_den = raw_flat_den.reshape(N_rays, N_samples, out_dim)
-        raw = torch.cat([raw_vel, raw_den], -1)
-        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, render_vel=render_vel)
-        vel_map = rgb_map[..., :2]
-        ret['vel_map'] = vel_map
-    elif render_sim:
-        assert dt is not None and dt > 0, 'dt must be specified a positive number for sim_onestep'
-        for i in range(sim_step):
-            if pts[0, 3] - dt < 0:
-                break
 
-            MacCormack = False  # It marginally (but consistently) improves, but slower. Don't use it until final results.
-            if not MacCormack:  # semi-lag for backtracing
-                raw_vel = network_query_fn_vel(pts)[0]  # raw_vel
-                pts[..., :3] = pts[..., :3] - dt * raw_vel
-                pts[..., 3] = pts[..., 3] - dt
-            else:  # MacCormack advection
-                raw_vel = network_query_fn_vel(pts)[0]
-                one_step_back_pts = pts.clone()
-                one_step_back_pts[..., :3] = pts[..., :3] - dt * raw_vel
-                one_step_back_pts[..., 3] = pts[..., 3] - dt
-                returning_vel = network_query_fn_vel(one_step_back_pts)[0]
-                returning_pts = one_step_back_pts.clone()
-                returning_pts[..., :3] = one_step_back_pts[..., :3] + dt * returning_vel
-                returning_pts[..., 3] = one_step_back_pts[..., 3] + dt
-                pts_maccorck = one_step_back_pts.clone()
-                pts_maccorck[..., :3] = pts_maccorck[..., :3] + (pts[..., :3] - returning_pts[..., :3]) / 2
-                pts = pts_maccorck
+    pts.requires_grad = True
+    model = kwargs['network_fn']
+    embed_fn = kwargs['embed_fn']
 
-        # query density
-        out_dim = 1
-        raw_flat_den = torch.zeros([N_rays, N_samples, out_dim]).reshape(-1, out_dim)
-        raw_flat_den[bbox_mask] = network_query_fn(pts)  # raw_den
-        raw_den = raw_flat_den.reshape(N_rays, N_samples, out_dim)
-        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw_den, z_vals, rays_d, learned_rgb=kwargs['network_fn'].rgb)
-        ret['rgb_map'] = rgb_map
-    elif render_grid:  # render from a voxel grid
-        assert den_grid is not None, 'den_grid must be specified for render_grid.'
-        out_dim = 1
-        raw_flat_den = torch.zeros([N_rays, N_samples, out_dim]).reshape(-1, out_dim)
+    def g(x):
+        return model(x)
 
-        pts_world = pts[..., :3]
-        pts_sim = bbox_model.world2sim(pts_world)
-        pts_sample = pts_sim * 2 - 1  # ranging [-1, 1]
-        den_grid = den_grid[None, ...].permute([0, 4, 3, 2, 1])  # [N, 1, Z, Y, X] i.e., [N, 1, D, H, W]
-        den_sampled = torch.nn.functional.grid_sample(den_grid, pts_sample[None, ..., None, None, :], align_corners=True)
+    h = embed_fn(pts)
+    raw_d = model(h)
+    jac = vmap(jacrev(g))(h)
+    jac_x = _get_minibatch_jacobian(h, pts)
+    jac = jac @ jac_x
 
-        raw_flat_den[bbox_mask] = den_sampled.reshape(-1, 1)
-        raw_den = raw_flat_den.reshape(N_rays, N_samples, out_dim)
+    ret = {'raw_d': raw_d, 'pts': pts}
+    _d_x, _d_y, _d_z, _d_t = [torch.squeeze(_, -1) for _ in jac.split(1, dim=-1)]
+    ret['_d_x'] = _d_x
+    ret['_d_y'] = _d_y
+    ret['_d_z'] = _d_z
+    ret['_d_t'] = _d_t
+    out_dim = 1
+    raw_flat = torch.zeros([N_rays, N_samples, out_dim]).reshape(-1, out_dim)
+    raw_flat[bbox_mask] = raw_d
+    raw = raw_flat.reshape(N_rays, N_samples, out_dim)
+    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d,
+                                                                 learned_rgb=kwargs['network_fn'].rgb)
+    ret['rgb_map'] = rgb_map
+    ret['raw_d'] = raw_d
 
-        if color_grid is not None:
-            raw_flat_rgb = torch.zeros([N_rays, N_samples, 3]).reshape(-1, 3)
-            color_grid = color_grid[None, ...].permute([0, 4, 3, 2, 1])  # [N, 1, Z, Y, X] i.e., [N, 3, D, H, W]
-            color_sampled = torch.nn.functional.grid_sample(color_grid, pts_sample[None, ..., None, None, :], align_corners=True)
-            raw_flat_rgb[bbox_mask] = color_sampled.reshape(-1, 1)
-            raw_rgb = raw_flat_rgb.reshape(N_rays, N_samples, 3)
-        else:
-            raw_rgb = None
-
-        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw_den, z_vals, rays_d, learned_rgb=kwargs['network_fn'].rgb if color_grid is None else raw_rgb)
-        ret['rgb_map'] = rgb_map
-    else:  # get density gradient for flow loss
-        pts.requires_grad = True
-        model = kwargs['network_fn']
-        embed_fn = kwargs['embed_fn']
-
-        def g(x):
-            return model(x)
-
-        h = embed_fn(pts)
-        raw_d = model(h)
-        jac = vmap(jacrev(g))(h)
-        jac_x = _get_minibatch_jacobian(h, pts)
-        jac = jac @ jac_x
-
-        ret = {'raw_d': raw_d, 'pts': pts}
-        _d_x, _d_y, _d_z, _d_t = [torch.squeeze(_, -1) for _ in jac.split(1, dim=-1)]
-        ret['_d_x'] = _d_x
-        ret['_d_y'] = _d_y
-        ret['_d_z'] = _d_z
-        ret['_d_t'] = _d_t
-        out_dim = 1
-        raw_flat = torch.zeros([N_rays, N_samples, out_dim]).reshape(-1, out_dim)
-        raw_flat[bbox_mask] = raw_d
-        raw = raw_flat.reshape(N_rays, N_samples, out_dim)
-        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d,
-                                                                     learned_rgb=kwargs['network_fn'].rgb)
-        ret['rgb_map'] = rgb_map
-        ret['raw_d'] = raw_d
     return ret
 
 
@@ -1210,14 +1099,8 @@ def train():
 
     # Create nerf model
     ############################
-    from src.encoder import HashEncoderHyFluid
-    # embed_fn, input_ch = get_encoder('hashgrid', input_dim=4, num_levels=args.num_levels, base_resolution=args.base_resolution,
-    #                                  finest_resolution=args.finest_resolution, log2_hashmap_size=args.log2_hashmap_size,)
-    max_res = np.array([args.finest_resolution, args.finest_resolution, args.finest_resolution, args.finest_resolution_t])
-    min_res = np.array([args.base_resolution, args.base_resolution, args.base_resolution, args.base_resolution_t])
-
-    embed_fn = HashEncoderHyFluid(max_res=max_res, min_res=min_res, num_scales=args.num_levels,
-                                  max_params=2 ** args.log2_hashmap_size)
+    from src.encoder2 import HashEncoderNative
+    embed_fn = HashEncoderNative(max_res=args.finest_resolution, min_res=args.base_resolution, device=device)
     input_ch = embed_fn.num_scales * 2  # default 2 params per scale
     embedding_params = list(embed_fn.parameters())
 
@@ -1264,11 +1147,7 @@ def train():
 
     # Create nerf model
     ############################
-    max_res_v = np.array([args.finest_resolution_v, args.finest_resolution_v, args.finest_resolution_v, args.finest_resolution_v_t])
-    min_res_v = np.array([args.base_resolution_v, args.base_resolution_v, args.base_resolution_v, args.base_resolution_v_t])
-
-    embed_fn_v = HashEncoderHyFluid(max_res=max_res_v, min_res=min_res_v, num_scales=args.num_levels,
-                                    max_params=2 ** args.log2_hashmap_size)
+    embed_fn_v = HashEncoderNative(max_res=args.finest_resolution_v, min_res=args.base_resolution_v, device=device)
     input_ch_v = embed_fn_v.num_scales * 2  # default 2 params per scale
     embedding_params_v = list(embed_fn_v.parameters())
 
