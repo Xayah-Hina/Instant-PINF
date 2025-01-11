@@ -1,17 +1,34 @@
+import numpy as np
+import torch
 import src.radam as radam
 import src.model as mmodel
 
-import numpy as np
-import torch
-from tqdm import tqdm, trange
 import os
-import json
-############################################################################################################
-# from taichi_encoders.mgpcg import MGPCG_3
-
-import taichi as ti
 import math
 import time
+
+import taichi as ti
+
+
+def batchify_query(inputs, query_function, batch_size=2 ** 22):
+    """
+    args:
+        inputs: [..., input_dim]
+    return:
+        outputs: [..., output_dim]
+    """
+    input_dim = inputs.shape[-1]
+    input_shape = inputs.shape
+    inputs = inputs.view(-1, input_dim)  # flatten all but last dim
+    N = inputs.shape[0]
+    outputs = []
+    for i in range(0, N, batch_size):
+        output = query_function(inputs[i:i + batch_size])
+        if isinstance(output, tuple):
+            output = output[0]
+        outputs.append(output)
+    outputs = torch.cat(outputs, dim=0)
+    return outputs.view(*input_shape[:-1], -1)  # unflatten
 
 
 @ti.func
@@ -432,97 +449,30 @@ class MGPCG_3(MGPCG):
         return vel
 
 
-############################################################################################################
-
-def save_quiver_plot(u, v, res, save_path, scale=0.00000002):
-    """
-    Args:
-        u: [H, W], vel along x (W)
-        v: [H, W], vel along y (H)
-        res: resolution of the plot along the longest axis; if None, let step = 1
-        save_path:
-    """
-    import matplotlib.pyplot as plt
-    import matplotlib
-    H, W = u.shape
-    y, x = np.mgrid[0:H, 0:W]
-    axis_len = max(H, W)
-    step = 1 if res is None else axis_len // res
-    xq = [i[::step] for i in x[::step]]
-    yq = [i[::step] for i in y[::step]]
-    uq = [i[::step] for i in u[::step]]
-    vq = [i[::step] for i in v[::step]]
-
-    uv_norm = np.sqrt(np.array(uq) ** 2 + np.array(vq) ** 2).max()
-    short_len = min(H, W)
-    matplotlib.rcParams['font.size'] = 10 / short_len * axis_len
-    fig, ax = plt.subplots(figsize=(10 / short_len * W, 10 / short_len * H))
-    q = ax.quiver(xq, yq, uq, vq, pivot='tail', angles='uv', scale_units='xy', scale=scale / step)
-    ax.invert_yaxis()
-    plt.quiverkey(q, X=0.6, Y=1.05, U=uv_norm, label=f'Max arrow length = {uv_norm:.2g}', labelpos='E')
-    plt.savefig(save_path)
-    plt.close()
-    return
-
-
-# Ray helpers
-def get_rays(H, W, K, c2w):
-    i, j = torch.meshgrid(torch.linspace(0, W - 1, W), torch.linspace(0, H - 1, H),
-                          indexing='ij')  # pytorch's meshgrid has indexing='ij'
-    i = i.t()
-    j = j.t()
-    dirs = torch.stack([(i - K[0][2]) / K[0][0], -(j - K[1][2]) / K[1][1], -torch.ones_like(i)], -1)
-    # Rotate ray directions from camera frame to the world frame
-    rays_d = torch.sum(dirs[..., np.newaxis, :] * c2w[:3, :3],
-                       -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
-    # Translate camera frame's origin to the world frame. It is the origin of all rays.
-    rays_o = c2w[:3, -1].expand(rays_d.shape)
-    return rays_o, rays_d
-
-
-def get_rays_np_continuous(H, W, K, c2w):
+def get_rays_np_continuous(H, W, c2w):
+    # Generate random offsets for pixel coordinates
+    random_offset = np.random.uniform(0, 1, size=(H, W, 2))
     i, j = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing='xy')
-    random_offset_i = np.random.uniform(0, 1, size=(H, W))
-    random_offset_j = np.random.uniform(0, 1, size=(H, W))
-    i = i + random_offset_i
-    j = j + random_offset_j
-    i = np.clip(i, 0, W - 1)
-    j = np.clip(j, 0, H - 1)
+    pixel_coords = np.stack((i, j), axis=-1) + random_offset
 
-    dirs = np.stack([(i - K[0][2]) / K[0][0], -(j - K[1][2]) / K[1][1], -np.ones_like(i)], -1)
-    # Rotate ray directions from camera frame to the world frame
-    rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3, :3],
-                    -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
-    # Translate camera frame's origin to the world frame. It is the origin of all rays.
-    rays_o = np.broadcast_to(c2w[:3, -1], np.shape(rays_d))
-    return rays_o, rays_d, i, j
+    # Clip pixel coordinates
+    pixel_coords[..., 0] = np.clip(pixel_coords[..., 0], 0, W - 1)
+    pixel_coords[..., 1] = np.clip(pixel_coords[..., 1], 0, H - 1)
 
+    # Compute ray directions in camera space
+    dirs = np.stack([
+        (pixel_coords[..., 0] - K[0][2]) / K[0][0],
+        -(pixel_coords[..., 1] - K[1][2]) / K[1][1],
+        -np.ones_like(pixel_coords[..., 0])
+    ], axis=-1)
 
-# Misc
-img2mse = lambda x, y: torch.mean((x - y) ** 2)
-mse2psnr = lambda x: -10. * torch.log(x) / torch.log(torch.Tensor([10.]))
-to8b = lambda x: (255 * np.clip(x, 0, 1)).astype(np.uint8)
+    # Transform ray directions to world space
+    rays_d = dirs @ c2w[:3, :3].T
 
+    # Compute ray origins in world space
+    rays_o = np.broadcast_to(c2w[:3, -1], rays_d.shape)
 
-def batchify_query(inputs, query_function, batch_size=2 ** 22):
-    """
-    args:
-        inputs: [..., input_dim]
-    return:
-        outputs: [..., output_dim]
-    """
-    input_dim = inputs.shape[-1]
-    input_shape = inputs.shape
-    inputs = inputs.view(-1, input_dim)  # flatten all but last dim
-    N = inputs.shape[0]
-    outputs = []
-    for i in range(0, N, batch_size):
-        output = query_function(inputs[i:i + batch_size])
-        if isinstance(output, tuple):
-            output = output[0]
-        outputs.append(output)
-    outputs = torch.cat(outputs, dim=0)
-    return outputs.view(*input_shape[:-1], -1)  # unflatten
+    return rays_o, rays_d, pixel_coords[..., 0], pixel_coords[..., 1]
 
 
 def sample_bilinear(img, xy):
@@ -557,136 +507,86 @@ def sample_bilinear(img, xy):
     return interpolated
 
 
-############################################################################################################
+def do_resample_rays(H, W):
+    rays_list = []
+    ij = []
+    for p in POSES_TRAIN_np[:, :3, :4]:
+        r_o, r_d, i_, j_ = get_rays_np_continuous(H, W, p)
+        rays_list.append([r_o, r_d])
+        ij.append([i_, j_])
+    ij = np.stack(ij, 0)
+    images_train_sample = sample_bilinear(IMAGE_TRAIN_np, ij)
+    ret_IMAGE_TRAIN_gpu = torch.tensor(images_train_sample, device=device, dtype=torch.float32).flatten(start_dim=1, end_dim=3)
 
-def pos_world2smoke(Pworld, w2s, scale_vector):
-    pos_rot = torch.sum(Pworld[..., None, :] * (w2s[:3, :3]), -1)  # 4.world to 3.target
-    pos_off = (w2s[:3, -1]).expand(pos_rot.shape)  # 4.world to 3.target
-    new_pose = pos_rot + pos_off
-    pos_scale = new_pose / (scale_vector)  # 3.target to 2.simulation
-    return pos_scale
+    rays_np = np.stack(rays_list, 0)
+    rays_np = np.transpose(rays_np, [0, 2, 3, 1, 4])
+    rays_np = np.reshape(rays_np, [-1, 2, 3])  # [VHW, ro+rd=2, 3]
+    rays_np = rays_np.astype(np.float32)
+    ret_RAYs_gpu = torch.tensor(rays_np, device=device, dtype=torch.float32)
+    ret_RAY_IDX_gpu = torch.randperm(ret_RAYs_gpu.shape[0], device=device, dtype=torch.int32)
 
-
-class BBox_Tool(object):
-    def __init__(self, smoke_tran_inv, smoke_scale, in_min=[0.15, 0.0, 0.15], in_max=[0.85, 1., 0.85]):
-        self.s_w2s = torch.tensor(smoke_tran_inv).expand([4, 4]).float()
-        self.s2w = torch.inverse(self.s_w2s)
-        self.s_scale = torch.tensor(smoke_scale.copy()).expand([3]).float()
-        self.s_min = torch.Tensor(in_min)
-        self.s_max = torch.Tensor(in_max)
-
-    def world2sim(self, pts_world):
-        pts_world_homo = torch.cat([pts_world, torch.ones_like(pts_world[..., :1])], dim=-1)
-        pts_sim_ = torch.matmul(self.s_w2s, pts_world_homo[..., None]).squeeze(-1)[..., :3]
-        pts_sim = pts_sim_ / (self.s_scale)  # 3.target to 2.simulation
-        return pts_sim
-
-    def world2sim_rot(self, pts_world):
-        pts_sim_ = torch.matmul(self.s_w2s[:3, :3], pts_world[..., None]).squeeze(-1)
-        pts_sim = pts_sim_ / (self.s_scale)  # 3.target to 2.simulation
-        return pts_sim
-
-    def sim2world(self, pts_sim):
-        pts_sim_ = pts_sim * self.s_scale
-        pts_sim_homo = torch.cat([pts_sim_, torch.ones_like(pts_sim_[..., :1])], dim=-1)
-        pts_world = torch.matmul(self.s2w, pts_sim_homo[..., None]).squeeze(-1)[..., :3]
-        return pts_world
-
-    def sim2world_rot(self, pts_sim):
-        pts_sim_ = pts_sim * self.s_scale
-        pts_world = torch.matmul(self.s2w[:3, :3], pts_sim_[..., None]).squeeze(-1)
-        return pts_world
-
-    def isInside(self, inputs_pts):
-        target_pts = pos_world2smoke(inputs_pts, self.s_w2s, self.s_scale)
-        above = torch.logical_and(target_pts[..., 0] >= self.s_min[0], target_pts[..., 1] >= self.s_min[1])
-        above = torch.logical_and(above, target_pts[..., 2] >= self.s_min[2])
-        below = torch.logical_and(target_pts[..., 0] <= self.s_max[0], target_pts[..., 1] <= self.s_max[1])
-        below = torch.logical_and(below, target_pts[..., 2] <= self.s_max[2])
-        outputs = torch.logical_and(below, above)
-        return outputs
-
-    def insideMask(self, inputs_pts, to_float=True):
-        return self.isInside(inputs_pts).to(torch.float) if to_float else self.isInside(inputs_pts)
+    return ret_IMAGE_TRAIN_gpu, ret_RAYs_gpu, ret_RAY_IDX_gpu
 
 
-############################################################################################################
+def get_ray_batch(RAYs: torch.Tensor, RAYs_IDX: torch.Tensor, start: int, end: int):
+    BATCH_RAYs_IDX = RAYs_IDX[start:end]  # [batch_size]
+    BATCH_RAYs_O, BATCH_RAYs_D = torch.transpose(RAYs[BATCH_RAYs_IDX], 0, 1)  # [batch_size, 3]
+    return BATCH_RAYs_O, BATCH_RAYs_D, BATCH_RAYs_IDX
 
 
-def merge_imgs(save_dir, framerate=30, prefix=''):
-    os.system(
-        'ffmpeg -hide_banner -loglevel error -y -i {0}/{1}%03d.png -vf palettegen {0}/palette.png'.format(save_dir,
-                                                                                                          prefix))
-    os.system(
-        'ffmpeg -hide_banner -loglevel error -y -framerate {0} -i {1}/{2}%03d.png -i {1}/palette.png -lavfi paletteuse {1}/_{2}.gif'.format(
-            framerate, save_dir, prefix))
-    os.system(
-        'ffmpeg -hide_banner -loglevel error -y -framerate {0} -i {1}/{2}%03d.png -i {1}/palette.png -lavfi paletteuse -vcodec prores {1}/_{2}.mov'.format(
-            framerate, save_dir, prefix))
+def get_frames_at_times(IMAGEs: torch.Tensor, N_frames: int, N_times: int):
+    assert N_frames > 1
+    TIMEs_IDX = torch.randperm(N_frames, device=IMAGEs.device, dtype=torch.float32)[:N_times] + torch.randn(N_times, device=IMAGEs.device, dtype=torch.float32)  # [N_times]
+    TIMEs_IDX_FLOOR = torch.clamp(torch.floor(TIMEs_IDX).long(), 0, N_frames - 1)  # [N_times]
+    TIMEs_IDX_CEIL = torch.clamp(torch.ceil(TIMEs_IDX).long(), 0, N_frames - 1)  # [N_times]
+    TIMEs_IDX_RESIDUAL = TIMEs_IDX - TIMEs_IDX_FLOOR.float()  # [N_times]
+    TIME_STEPs = TIMEs_IDX / (N_frames - 1)  # [N_times]
+
+    FRAMES_INTERPOLATED = IMAGEs[TIMEs_IDX_FLOOR] * (1 - TIMEs_IDX_RESIDUAL).view(-1, 1, 1) + IMAGEs[TIMEs_IDX_CEIL] * TIMEs_IDX_RESIDUAL.view(-1, 1, 1)
+    return FRAMES_INTERPOLATED, TIME_STEPs
 
 
-class AverageMeter(object):
-    """Computes and stores the average and current value"""
-    val = 0
-    avg = 0
-    sum = 0
-    count = 0
-    tot_count = 0
+def get_points(RAYs_O: torch.Tensor, RAYs_D: torch.Tensor, near: float, far: float, N_depths: int, randomize: bool):
+    T_VALs = torch.linspace(0., 1., steps=N_depths, device=RAYs_D.device, dtype=torch.float32)  # [N_depths]
+    Z_VALs = near * torch.ones_like(RAYs_D[..., :1]) * (1. - T_VALs) + far * torch.ones_like(RAYs_D[..., :1]) * T_VALs  # [batch_size, N_depths]
 
-    def __init__(self):
-        self.reset()
-        self.tot_count = 0
+    if randomize:
+        MID_VALs = .5 * (Z_VALs[..., 1:] + Z_VALs[..., :-1])  # [batch_size, N_depths-1]
+        UPPER_VALs = torch.cat([MID_VALs, Z_VALs[..., -1:]], -1)  # [batch_size, N_depths]
+        LOWER_VALs = torch.cat([Z_VALs[..., :1], MID_VALs], -1)  # [batch_size, N_depths]
+        T_RAND = torch.rand(Z_VALs.shape, device=RAYs_D.device, dtype=torch.float32)  # [batch_size, N_depths]
+        Z_VALs = LOWER_VALs + (UPPER_VALs - LOWER_VALs) * T_RAND  # [batch_size, N_depths]
 
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
-    def update(self, val, n=1):
-        self.val = float(val)
-        self.sum += float(val) * n
-        self.count += n
-        self.tot_count += n
-        self.avg = self.sum / self.count
+    DIST_VALs = Z_VALs[..., 1:] - Z_VALs[..., :-1]  # [batch_size, N_depths-1]
+    POINTS = RAYs_O[..., None, :] + RAYs_D[..., None, :] * Z_VALs[..., :, None]  # [batch_size, N_depths, 3]
+    return POINTS, DIST_VALs
 
 
-############################################################################################################
-from torch.func import vmap, jacrev
-
-ti.init(arch=ti.cuda, device_memory_GB=12.0)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-np.random.seed(0)
-
-
-def batchify_rays(rays_flat, chunk=1024 * 64, **kwargs):
-    """Render rays in smaller minibatches to avoid OOM.
+## START
+def _get_minibatch_jacobian(y, x):
+    """Computes the Jacobian of y wrt x assuming minibatch-mode.
+    Args:
+      y: (N, ...) with a total of D_y elements in ...
+      x: (N, ...) with a total of D_x elements in ...
+    Returns:
+      The minibatch Jacobian matrix of shape (N, D_y, D_x)
     """
-    all_ret = {}
-    for i in range(0, rays_flat.shape[0], chunk):
-        ret = render_rays(rays_flat[i:i + chunk], **kwargs)
-        for k in ret:
-            if k not in all_ret:
-                all_ret[k] = []
-            all_ret[k].append(ret[k])
+    assert y.shape[0] == x.shape[0]
+    y = y.view(y.shape[0], -1)
+    # Compute Jacobian row by row.
+    jac = []
+    for j in range(y.shape[1]):
+        dy_j_dx = torch.autograd.grad(
+            y[:, j],
+            x,
+            torch.ones_like(y[:, j], device=y.get_device()),
+            retain_graph=True,
+            create_graph=True,
+        )[0].view(x.shape[0], -1)
 
-    all_ret = {k: torch.cat(all_ret[k], 0) for k in all_ret}
-    return all_ret
-
-
-def batchify_get_ray_pts_velocity_and_derivitive(pts, chunk=1024 * 64, **kwargs):
-    """Render rays in smaller minibatches to avoid OOM.
-    """
-    all_ret = {}
-    for i in range(0, pts.shape[0], chunk):
-        ret = get_ray_pts_velocity_and_derivitives(pts[i:i + chunk], **kwargs)
-        for k in ret:
-            if k not in all_ret:
-                all_ret[k] = []
-            all_ret[k].append(ret[k])
-
-    all_ret = {k: torch.cat(all_ret[k], 0) for k in all_ret}
-    return all_ret
+        jac.append(torch.unsqueeze(dy_j_dx, 1))
+    jac = torch.cat(jac, 1)
+    return jac
 
 
 def PDE_EQs(D_t, D_x, D_y, D_z, U, F, U_t=None, U_x=None, U_y=None, U_z=None, detach=False):
@@ -724,251 +624,6 @@ def PDE_EQs(D_t, D_x, D_y, D_z, U, F, U_t=None, U_x=None, U_y=None, U_z=None, de
         eqs += [dxs[1] + dys[2] + dzs[3]]
 
     return eqs
-
-
-def render(H, W, K, rays=None, c2w=None,
-           near=0., far=1., time_step=None,
-           **kwargs):
-    """Render rays
-    Args:
-      H: int. Height of image in pixels.
-      W: int. Width of image in pixels.
-      K: float. Focal length of pinhole camera.
-      rays: array of shape [2, batch_size, 3]. Ray origin and direction for
-        each example in batch.
-      c2w: array of shape [3, 4]. Camera-to-world transformation matrix.
-      near: float or array of shape [batch_size]. Nearest distance for a ray.
-      far: float or array of shape [batch_size]. Farthest distance for a ray.
-    Returns:
-      rgb_map: [batch_size, 3]. Predicted RGB values for rays.
-      disp_map: [batch_size]. Disparity map. Inverse of depth.
-      acc_map: [batch_size]. Accumulated opacity (alpha) along a ray.
-      extras: dict with everything returned by render_rays().
-    """
-    if c2w is not None:
-        # special case to render full image
-        rays_o, rays_d = get_rays(H, W, K, c2w)
-    else:
-        # use provided ray batch
-        rays_o, rays_d = rays
-
-    sh = rays_d.shape  # [..., 3]
-
-    # Create ray batch
-    rays_o = torch.reshape(rays_o, [-1, 3]).float()
-    rays_d = torch.reshape(rays_d, [-1, 3]).float()
-
-    near, far = near * torch.ones_like(rays_d[..., :1]), far * torch.ones_like(rays_d[..., :1])
-    rays = torch.cat([rays_o, rays_d, near, far], -1)
-    time_step = time_step[:, None, None]  # [N_t, 1, 1]
-    N_t = time_step.shape[0]
-    N_r = rays.shape[0]
-    rays = torch.cat([rays[None].expand(N_t, -1, -1), time_step.expand(-1, N_r, -1)], -1)  # [N_t, n_rays, 7]
-    rays = rays.flatten(0, 1)  # [n_time_steps * n_rays, 7]
-
-    # Render and reshape
-    all_ret = batchify_rays(rays, **kwargs)
-    if 'vel_map' in all_ret:
-        k_extract = ['vel_map']
-    elif 'rgb_map' in all_ret:
-        k_extract = ['rgb_map']
-    else:
-        k_extract = []
-    if N_t == 1:
-        for k in k_extract:
-            k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
-            all_ret[k] = torch.reshape(all_ret[k], k_sh)
-
-    ret_list = [all_ret[k] for k in k_extract]
-    ret_dict = [{k: all_ret[k] for k in all_ret if k not in k_extract}, ]
-    return ret_list + ret_dict
-
-
-def get_velocity_and_derivitives(pts,
-                                 **kwargs):
-    """Render rays
-    Args:
-      H: int. Height of image in pixels.
-      W: int. Width of image in pixels.
-      K: float. Focal length of pinhole camera.
-      rays: array of shape [2, batch_size, 3]. Ray origin and direction for
-        each example in batch.
-      c2w: array of shape [3, 4]. Camera-to-world transformation matrix.
-      near: float or array of shape [batch_size]. Nearest distance for a ray.
-      far: float or array of shape [batch_size]. Farthest distance for a ray.
-    Returns:
-      rgb_map: [batch_size, 3]. Predicted RGB values for rays.
-      disp_map: [batch_size]. Disparity map. Inverse of depth.
-      acc_map: [batch_size]. Accumulated opacity (alpha) along a ray.
-      extras: dict with everything returned by render_rays().
-    """
-
-    # Render and reshape
-    all_ret = batchify_get_ray_pts_velocity_and_derivitive(pts, **kwargs)
-
-    k_extract = ['raw_vel', 'raw_f'] if kwargs['no_vel_der'] else ['raw_vel', 'raw_f', '_u_x', '_u_y', '_u_z', '_u_t']
-    ret_list = [all_ret[k] for k in k_extract]
-    return ret_list
-
-
-def raw2outputs(raw, z_vals, rays_d, learned_rgb=None, render_vel=False):
-    """Transforms model's predictions to semantically meaningful values.
-    Args:
-        raw: [num_rays, num_samples along ray, 4]. Prediction from model.
-        z_vals: [num_rays, num_samples along ray]. Integration time.
-        rays_d: [num_rays, 3]. Direction of each ray.
-    Returns:
-        rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
-        disp_map: [num_rays]. Disparity map. Inverse of depth map.
-        acc_map: [num_rays]. Sum of weights along each ray.
-        weights: [num_rays, num_samples]. Weights assigned to each sampled color.
-        depth_map: [num_rays]. Estimated distance to object.
-    """
-    raw2alpha = lambda raw, dists, act_fn=torch.nn.functional.relu: 1. - torch.exp(-act_fn(raw) * dists)
-
-    dists = z_vals[..., 1:] - z_vals[..., :-1]
-    dists = torch.cat([dists, torch.tensor([0.1]).expand(dists[..., :1].shape)], -1)  # [N_rays, N_samples]
-
-    dists = dists * torch.norm(rays_d[..., None, :], dim=-1)
-
-    noise = 0.
-
-    alpha = raw2alpha(raw[..., -1] + noise, dists)  # [N_rays, N_samples]
-    weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1. - alpha + 1e-10], -1), -1)[:, :-1]  # [N_rays, N_samples]
-    if render_vel:
-        mask = raw[..., -1] > 0.1
-        N_samples = raw.shape[1]
-        rgb_map = raw[:, int(N_samples / 3.5), :3] * mask[:, int(N_samples / 3.5), None]
-    else:
-        rgb = torch.ones(3) * (0.6 + torch.tanh(learned_rgb) * 0.4)
-        rgb_map = torch.sum(weights[..., None] * rgb, -2)  # [N_rays, 3]
-
-    depth_map = torch.sum(weights * z_vals, -1) / (torch.sum(weights, -1) + 1e-10)
-    disp_map = 1. / torch.max(1e-10 * torch.ones_like(depth_map), depth_map)
-    acc_map = torch.sum(weights, -1)
-    depth_map[acc_map < 1e-1] = 0.
-
-    return rgb_map, disp_map, acc_map, weights, depth_map
-
-
-def render_rays(ray_batch,
-                network_query_fn,
-                N_samples,
-                retraw=False,
-                network_query_fn_vel=None,
-                perturb=0.,
-                ret_derivative=True,
-                render_vel=False,
-                render_sim=False,
-                render_grid=False,
-                den_grid=None,
-                color_grid=None,
-                sim_step=0,
-                dt=None,
-                **kwargs):
-    """Volumetric rendering.
-    Args:
-      ray_batch: array of shape [batch_size, ...]. All information necessary
-        for sampling along a ray, including: ray origin, ray direction, min
-        dist, max dist, and unit-magnitude viewing direction.
-      network_query_fn: function used for passing queries to network_fn.
-      N_samples: int. Number of different times to sample along each ray.
-      retraw: bool. If True, include model's raw, unprocessed predictions.
-      perturb: float, 0 or 1. If non-zero, each ray is sampled at stratified
-        random points in time.
-    Returns:
-      rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
-      disp_map: [num_rays]. Disparity map. 1 / depth.
-      acc_map: [num_rays]. Accumulated opacity along each ray.
-      raw: [num_rays, num_samples, 4]. Raw predictions from model.
-      z_std: [num_rays]. Standard deviation of distances along ray for each
-        sample.
-    """
-    N_rays = ray_batch.shape[0]
-    rays_o, rays_d = ray_batch[:, 0:3], ray_batch[:, 3:6]  # [N_rays, 3] each
-    time_step = ray_batch[0, -1]
-    bounds = torch.reshape(ray_batch[..., 6:8], [-1, 1, 2])
-    near, far = bounds[..., 0], bounds[..., 1]  # [-1,1]
-
-    t_vals = torch.linspace(0., 1., steps=N_samples)
-    z_vals = near * (1. - t_vals) + far * (t_vals)
-
-    z_vals = z_vals.expand([N_rays, N_samples])
-
-    if perturb > 0.:
-        # get intervals between samples
-        mids = .5 * (z_vals[..., 1:] + z_vals[..., :-1])
-        upper = torch.cat([mids, z_vals[..., -1:]], -1)
-        lower = torch.cat([z_vals[..., :1], mids], -1)
-        # stratified samples in those intervals
-        t_rand = torch.rand(z_vals.shape)
-
-        z_vals = lower + (upper - lower) * t_rand
-
-    pts = rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]  # [N_rays, N_samples, 3]
-    pts = torch.cat([pts, time_step * torch.ones((pts.shape[0], pts.shape[1], 1))], -1)  # [..., 4]
-    pts_flat = torch.reshape(pts, [-1, 4])
-    bbox_mask = bbox_model.insideMask(pts_flat[..., :3], to_float=False)
-    if bbox_mask.sum() == 0:
-        bbox_mask[0] = True  # in case zero rays are inside the bbox
-    pts = pts_flat[bbox_mask]
-    ret = {}
-
-    pts.requires_grad = True
-    model = kwargs['network_fn']
-    embed_fn = kwargs['embed_fn']
-
-    def g(x):
-        return model(x)
-
-    h = embed_fn(pts)
-    raw_d = model(h)
-    jac = vmap(jacrev(g))(h)
-    jac_x = _get_minibatch_jacobian(h, pts)
-    jac = jac @ jac_x
-
-    ret = {'raw_d': raw_d, 'pts': pts}
-    _d_x, _d_y, _d_z, _d_t = [torch.squeeze(_, -1) for _ in jac.split(1, dim=-1)]
-    ret['_d_x'] = _d_x
-    ret['_d_y'] = _d_y
-    ret['_d_z'] = _d_z
-    ret['_d_t'] = _d_t
-    out_dim = 1
-    raw_flat = torch.zeros([N_rays, N_samples, out_dim]).reshape(-1, out_dim)
-    raw_flat[bbox_mask] = raw_d
-    raw = raw_flat.reshape(N_rays, N_samples, out_dim)
-    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d,
-                                                                 learned_rgb=kwargs['network_fn'].rgb)
-    ret['rgb_map'] = rgb_map
-    ret['raw_d'] = raw_d
-
-    return ret
-
-
-def _get_minibatch_jacobian(y, x):
-    """Computes the Jacobian of y wrt x assuming minibatch-mode.
-    Args:
-      y: (N, ...) with a total of D_y elements in ...
-      x: (N, ...) with a total of D_x elements in ...
-    Returns:
-      The minibatch Jacobian matrix of shape (N, D_y, D_x)
-    """
-    assert y.shape[0] == x.shape[0]
-    y = y.view(y.shape[0], -1)
-    # Compute Jacobian row by row.
-    jac = []
-    for j in range(y.shape[1]):
-        dy_j_dx = torch.autograd.grad(
-            y[:, j],
-            x,
-            torch.ones_like(y[:, j], device=y.get_device()),
-            retain_graph=True,
-            create_graph=True,
-        )[0].view(x.shape[0], -1)
-
-        jac.append(torch.unsqueeze(dy_j_dx, 1))
-    jac = torch.cat(jac, 1)
-    return jac
 
 
 def get_ray_pts_velocity_and_derivitives(
@@ -1012,7 +667,7 @@ def get_ray_pts_velocity_and_derivitives(
     ret['raw_vel'] = vel_output
     ret['raw_f'] = f_output
     if not kwargs['no_vel_der']:
-        jac = vmap(jacrev(g))(h)
+        jac = torch.vmap(torch.func.jacrev(g))(h)
         jac_x = _get_minibatch_jacobian(h, pts)
         jac = jac @ jac_x
         assert jac.shape == (pts.shape[0], 3, 4)
@@ -1027,15 +682,137 @@ def get_ray_pts_velocity_and_derivitives(
     return ret
 
 
+def batchify_get_ray_pts_velocity_and_derivitive(pts, chunk=1024 * 64, **kwargs):
+    """Render rays in smaller minibatches to avoid OOM.
+    """
+    all_ret = {}
+    for i in range(0, pts.shape[0], chunk):
+        ret = get_ray_pts_velocity_and_derivitives(pts[i:i + chunk], **kwargs)
+        for k in ret:
+            if k not in all_ret:
+                all_ret[k] = []
+            all_ret[k].append(ret[k])
+
+    all_ret = {k: torch.cat(all_ret[k], 0) for k in all_ret}
+    return all_ret
+
+
+def get_velocity_and_derivitives(pts,
+                                 **kwargs):
+    """Render rays
+    Args:
+      H: int. Height of image in pixels.
+      W: int. Width of image in pixels.
+      K: float. Focal length of pinhole camera.
+      rays: array of shape [2, batch_size, 3]. Ray origin and direction for
+        each example in batch.
+      c2w: array of shape [3, 4]. Camera-to-world transformation matrix.
+      near: float or array of shape [batch_size]. Nearest distance for a ray.
+      far: float or array of shape [batch_size]. Farthest distance for a ray.
+    Returns:
+      rgb_map: [batch_size, 3]. Predicted RGB values for rays.
+      disp_map: [batch_size]. Disparity map. Inverse of depth.
+      acc_map: [batch_size]. Accumulated opacity (alpha) along a ray.
+      extras: dict with everything returned by render_rays().
+    """
+
+    # Render and reshape
+    all_ret = batchify_get_ray_pts_velocity_and_derivitive(pts, **kwargs)
+
+    k_extract = ['raw_vel', 'raw_f'] if kwargs['no_vel_der'] else ['raw_vel', 'raw_f', '_u_x', '_u_y', '_u_z', '_u_t']
+    ret_list = [all_ret[k] for k in k_extract]
+    return ret_list
+
+
 def mean_squared_error(pred, exact):
     if type(pred) is np.ndarray:
         return np.mean(np.square(pred - exact))
     return torch.mean(torch.square(pred - exact))
 
 
-def train():
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+    val = 0
+    avg = 0
+    sum = 0
+    count = 0
+    tot_count = 0
+
+    def __init__(self):
+        self.reset()
+        self.tot_count = 0
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = float(val)
+        self.sum += float(val) * n
+        self.count += n
+        self.tot_count += n
+        self.avg = self.sum / self.count
+
+
+## END
+
+def get_raw(POINTS_TIME: torch.Tensor, DISTs: torch.Tensor, RAYs_D_FLAT: torch.Tensor, BBOX_MODEL, MODEL, ENCODER):
+    assert POINTS_TIME.dim() == 3 and POINTS_TIME.shape[-1] == 4
+    assert POINTS_TIME.shape[0] == DISTs.shape[0] == RAYs_D_FLAT.shape[0]
+    POINTS_TIME_FLAT = POINTS_TIME.view(-1, POINTS_TIME.shape[-1])  # [batch_size * N_depths, 4]
+    out_dim = 1
+    bbox_mask = BBOX_MODEL.insideMask(POINTS_TIME_FLAT[..., :3], to_float=False)
+    if bbox_mask.sum() == 0:
+        bbox_mask[0] = True
+        assert False
+    POINTS_TIME_FLAT_FINAL = POINTS_TIME_FLAT[bbox_mask]
+
+    ## START
+    POINTS_TIME_FLAT_FINAL.requires_grad = True
+
+    def g(x):
+        return MODEL(x)
+
+    h = ENCODER(POINTS_TIME_FLAT_FINAL)
+    raw_d = MODEL(h)
+    jac = torch.vmap(torch.func.jacrev(g))(h)
+    jac_x = _get_minibatch_jacobian(h, POINTS_TIME_FLAT_FINAL)
+    jac = jac @ jac_x
+    ret = {'raw_d': raw_d, 'pts': POINTS_TIME_FLAT_FINAL}
+    _d_x, _d_y, _d_z, _d_t = [torch.squeeze(_, -1) for _ in jac.split(1, dim=-1)]
+    ret['_d_x'] = _d_x
+    ret['_d_y'] = _d_y
+    ret['_d_z'] = _d_z
+    ret['_d_t'] = _d_t
+    ## END
+
+    RAW_FLAT = torch.zeros([POINTS_TIME_FLAT.shape[0], out_dim], device=POINTS_TIME_FLAT.device, dtype=torch.float32)
+    RAW_FLAT[bbox_mask] = raw_d
+    RAW = RAW_FLAT.reshape(*POINTS_TIME.shape[:-1], out_dim)
+    assert RAW.dim() == 3 and RAW.shape[-1] == 1
+
+    DISTs_cat = torch.cat([DISTs, torch.tensor([1e10], device=DISTs.device).expand(DISTs[..., :1].shape)], -1)  # [batch_size, N_depths]
+    DISTS_final = DISTs_cat * torch.norm(RAYs_D_FLAT[..., None, :], dim=-1)  # [batch_size, N_depths]
+
+    RGB_TRAINED = torch.ones(3, device=POINTS_TIME.device) * (0.6 + torch.tanh(MODEL.rgb) * 0.4)
+    raw2alpha = lambda raw, dists, act_fn=torch.nn.functional.relu: 1. - torch.exp(-act_fn(raw) * dists)
+    noise = 0.
+    alpha = raw2alpha(RAW[..., -1] + noise, DISTS_final)
+    weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1), device=device), 1. - alpha + 1e-10], -1), -1)[:, :-1]
+    rgb_map = torch.sum(weights[..., None] * RGB_TRAINED, -2)
+    return rgb_map, _d_x, _d_y, _d_z, _d_t, POINTS_TIME_FLAT_FINAL, raw_d
+
+
+if __name__ == '__main__':
+    device = torch.device("cuda")
+    ti.init(arch=ti.cuda, device_memory_GB=12.0)
+    np.random.seed(0)
+
     args_npz = np.load("args.npz", allow_pickle=True)
     from types import SimpleNamespace
+
     args = SimpleNamespace(**{
         key: value.item() if isinstance(value, np.ndarray) and value.size == 1 else
         value.tolist() if isinstance(value, np.ndarray) else
@@ -1043,211 +820,117 @@ def train():
         for key, value in args_npz.items()
     })
 
-    rx, ry, rz, proj_y, use_project, y_start = args.sim_res_x, args.sim_res_y, args.sim_res_z, args.proj_y, args.use_project, args.y_start
-    boundary_types = ti.Matrix([[1, 1], [2, 1], [1, 1]], ti.i32)  # boundaries: 1 means Dirichlet, 2 means Neumann
-    project_solver = MGPCG_3(boundary_types=boundary_types, N=[rx, proj_y, rz], base_level=3)
-
-    pinf_data = np.load("train_dataset.npz")
-    images_train_ = pinf_data['images_train']
-    poses_train = pinf_data['poses_train']
-    hwf = pinf_data['hwf']
-    render_poses = pinf_data['render_poses']
-    render_timesteps = pinf_data['render_timesteps']
-    voxel_tran = pinf_data['voxel_tran']
-    voxel_scale = pinf_data['voxel_scale']
-    near = pinf_data['near'].item()
-    far = pinf_data['far'].item()
-
-    pinf_data_test = np.load("test_dataset.npz")
-    images_test = pinf_data_test['images_test']
-    poses_test = pinf_data_test['poses_test']
-    hwf = pinf_data_test['hwf']
-    render_poses = pinf_data_test['render_poses']
-    render_timesteps = pinf_data_test['render_timesteps']
-    voxel_tran = pinf_data_test['voxel_tran']
-    voxel_scale = pinf_data_test['voxel_scale']
-    near = pinf_data_test['near'].item()
-    far = pinf_data_test['far'].item()
-
-    global bbox_model
-    voxel_tran_inv = np.linalg.inv(voxel_tran)
-    bbox_model = BBox_Tool(voxel_tran_inv, voxel_scale)
-    print('Loaded scalarflow', images_train_.shape, render_poses.shape, hwf, args.datadir)
-
-    # Cast intrinsics to right types
-    H, W, focal = hwf
-    H, W = int(H), int(W)
-    hwf = [H, W, focal]
-
-    K = np.array([
-        [focal, 0, 0.5 * W],
-        [0, focal, 0.5 * H],
-        [0, 0, 1]
-    ])
-
     # Create log dir and copy the config file
     basedir = args.basedir
     expname = args.expname
-
     os.makedirs(os.path.join(basedir, expname), exist_ok=True)
 
-    # Create nerf model
-    bds_dict = {
-        'near': near,
-        'far': far,
-    }
+    pinf_data = np.load("train_dataset.npz")
+    IMAGE_TRAIN_np = pinf_data['images_train']
+    POSES_TRAIN_np = pinf_data['poses_train']
+    HWF_np = pinf_data['hwf']
+    RENDER_POSE_np = pinf_data['render_poses']
+    RENDER_TIMESTEPs_np = pinf_data['render_timesteps']
 
-    # Create nerf model
-    ############################
+    NEAR_float = pinf_data['near'].item()
+    FAR_float = pinf_data['far'].item()
+    H_int = int(HWF_np[0])
+    W_int = int(HWF_np[1])
+    FOCAL_float = float(HWF_np[2])
+    K = np.array([[FOCAL_float, 0, 0.5 * W_int], [0, FOCAL_float, 0.5 * H_int], [0, 0, 1]])
+
+    ############################## Load Encoder ##############################
     from src.encoder import HashEncoderHyFluid
+
     max_res = np.array([args.finest_resolution, args.finest_resolution, args.finest_resolution, args.finest_resolution_t])
     min_res = np.array([args.base_resolution, args.base_resolution, args.base_resolution, args.base_resolution_t])
+    ENCODER_gpu = HashEncoderHyFluid(max_res=max_res, min_res=min_res, num_scales=args.num_levels, max_params=2 ** args.log2_hashmap_size)
+    max_res_v = np.array([args.finest_resolution_v, args.finest_resolution_v, args.finest_resolution_v, args.finest_resolution_v_t])
+    min_res_v = np.array([args.base_resolution_v, args.base_resolution_v, args.base_resolution_v, args.base_resolution_v_t])
+    ENCODER_v_gpu = HashEncoderHyFluid(max_res=max_res_v, min_res=min_res_v, num_scales=args.num_levels, max_params=2 ** args.log2_hashmap_size)
+    ############################## Load Encoder ##############################
 
-    embed_fn = HashEncoderHyFluid(max_res=max_res, min_res=min_res, num_scales=args.num_levels,
-                                  max_params=2 ** args.log2_hashmap_size)
-    input_ch = embed_fn.num_scales * 2  # default 2 params per scale
-    embedding_params = list(embed_fn.parameters())
+    ############################## Load Model ##############################
+    MODEL_gpu = mmodel.NeRFSmall(num_layers=2,
+                                 hidden_dim=64,
+                                 geo_feat_dim=15,
+                                 num_layers_color=2,
+                                 hidden_dim_color=16,
+                                 input_ch=ENCODER_gpu.num_scales * 2).to(device)
+    MODEL_v_gpu = mmodel.NeRFSmallPotential(num_layers=args.vel_num_layers,
+                                            hidden_dim=64,
+                                            geo_feat_dim=15,
+                                            num_layers_color=2,
+                                            hidden_dim_color=16,
+                                            input_ch=ENCODER_v_gpu.num_scales * 2,
+                                            use_f=args.use_f).to(device)
+    ############################## Load Model ##############################
 
-    model = mmodel.NeRFSmall(num_layers=2,
-                             hidden_dim=64,
-                             geo_feat_dim=15,
-                             num_layers_color=2,
-                             hidden_dim_color=16,
-                             input_ch=input_ch).to(device)
-    print(model)
-    print('Total number of trainable parameters in model: {}'.format(
-        sum([p.numel() for p in model.parameters() if p.requires_grad])))
-    print('Total number of parameters in embedding: {}'.format(
-        sum([p.numel() for p in embedding_params if p.requires_grad])))
-    grad_vars = list(model.parameters())
-
-    network_query_fn = lambda x: model(embed_fn(x))
-
-    # Create optimizer
-    optimizer = radam.RAdam([
-        {'params': grad_vars, 'weight_decay': 1e-6},
-        {'params': embedding_params, 'eps': 1e-15}
+    ############################## Load Optimizer ##############################
+    OPTIMIZER = radam.RAdam([
+        {'params': MODEL_gpu.parameters(), 'weight_decay': 1e-6},
+        {'params': ENCODER_gpu.parameters(), 'eps': 1e-15}
     ], lr=args.lrate_den, betas=(0.9, 0.99))
-    grad_vars += list(embedding_params)
-    start = 0
-    basedir = args.basedir
-    expname = args.expname
+    OPTIMIZER_v = torch.optim.RAdam([
+        {'params': MODEL_v_gpu.parameters(), 'weight_decay': 1e-6},
+        {'params': ENCODER_v_gpu.parameters(), 'eps': 1e-15}
+    ], lr=args.lrate, betas=(0.9, 0.99))
+    ############################## Load Optimizer ##############################
 
+    ############################## Load BoundingBox ##############################
+    import src.bbox as bbox
+
+    VOXEL_TRAN_np = pinf_data['voxel_tran']
+    VOXEL_SCALE_np = pinf_data['voxel_scale']
+    voxel_tran_inv = np.linalg.inv(VOXEL_TRAN_np)
+    BBOX_MODEL_gpu = bbox.BBox_Tool(voxel_tran_inv, VOXEL_SCALE_np)
+    ############################## Load BoundingBox ##############################
+
+    network_query_fn = lambda x: MODEL_gpu(ENCODER_gpu(x))
     render_kwargs_train = {
         'network_query_fn': network_query_fn,
         'perturb': args.perturb,
         'N_samples': args.N_samples,
-        'network_fn': model,
-        'embed_fn': embed_fn,
+        'network_fn': MODEL_gpu,
+        'embed_fn': ENCODER_gpu,
+        'near': NEAR_float,
+        'far': FAR_float,
     }
 
-    render_kwargs_test = {k: render_kwargs_train[k] for k in render_kwargs_train}
-    render_kwargs_test['perturb'] = False
 
-    ############################
-
-    render_kwargs_train.update(bds_dict)
-    render_kwargs_test.update(bds_dict)
-
-    # Create nerf model
-    ############################
-    max_res_v = np.array([args.finest_resolution_v, args.finest_resolution_v, args.finest_resolution_v, args.finest_resolution_v_t])
-    min_res_v = np.array([args.base_resolution_v, args.base_resolution_v, args.base_resolution_v, args.base_resolution_v_t])
-
-    embed_fn_v = HashEncoderHyFluid(max_res=max_res_v, min_res=min_res_v, num_scales=args.num_levels,
-                                    max_params=2 ** args.log2_hashmap_size)
-    input_ch_v = embed_fn_v.num_scales * 2  # default 2 params per scale
-    embedding_params_v = list(embed_fn_v.parameters())
-
-    model_v = mmodel.NeRFSmallPotential(num_layers=args.vel_num_layers,
-                                        hidden_dim=64,
-                                        geo_feat_dim=15,
-                                        num_layers_color=2,
-                                        hidden_dim_color=16,
-                                        input_ch=input_ch_v,
-                                        use_f=args.use_f).to(device)
-    grad_vars_vel = list(model_v.parameters())
-    print(model_v)
-    print('Total number of trainable parameters in model: {}'.format(
-        sum([p.numel() for p in model_v.parameters() if p.requires_grad])))
-    print('Total number of parameters in embedding: {}'.format(
-        sum([p.numel() for p in embedding_params_v if p.requires_grad])))
-
-    # network_query_fn = lambda x: model(embed_fn(x))
     def network_vel_fn(x):
         with torch.enable_grad():
             if not args.no_vel_der:
-                h = embed_fn_v(x)
-                v, f = model_v(h)
+                h = ENCODER_v_gpu(x)
+                v, f = MODEL_v_gpu(h)
                 return v, f, h
             else:
-                v, f = model_v(embed_fn_v(x))
+                v, f = MODEL_v_gpu(ENCODER_v_gpu(x))
                 return v, f
 
-    # Create optimizer
-    optimizer_vel = torch.optim.RAdam([
-        {'params': grad_vars_vel, 'weight_decay': 1e-6},
-        {'params': embedding_params_v, 'eps': 1e-15}
-    ], lr=args.lrate, betas=(0.9, 0.99))
-    grad_vars_vel += list(embedding_params_v)
-    start_vel = 0
-    basedir = args.basedir
-    expname = args.expname
-
-    ##########################
 
     render_kwargs_train_vel = {
         'network_vel_fn': network_vel_fn,
         'perturb': args.perturb,
         'N_samples': args.N_samples,
-
-        'network_fn': model_v,
-        'embed_fn': embed_fn_v,
+        'network_fn': MODEL_v_gpu,
+        'embed_fn': ENCODER_v_gpu,
+        'near': NEAR_float,
+        'far': FAR_float,
     }
 
-    render_kwargs_test_vel = {k: render_kwargs_train_vel[k] for k in render_kwargs_train_vel}
-    render_kwargs_test_vel['perturb'] = False
+    import tqdm
+    import os
 
-    ############################
+    batch_size = 256
+    time_size = 1
+    depth_size = 192
+    global_step = 1
+    GRAD_vars = list(MODEL_gpu.parameters()) + list(ENCODER_gpu.parameters()) + list(MODEL_v_gpu.parameters()) + list(ENCODER_v_gpu.parameters())
 
-    render_kwargs_train_vel.update(bds_dict)
-    render_kwargs_test_vel.update(bds_dict)
-    global_step = start
-    # Move testing data to GPU
-    render_poses = torch.Tensor(render_poses).to(device)
+    lrate = 0.01
+    lrate_decay = 100000
 
-    # Prepare raybatch tensor if batching random rays
-    N_rand = args.N_rand
-    # For random ray batching
-    print('get rays')
-    rays = []
-    ij = []
-
-    # anti-aliasing
-    for p in poses_train[:, :3, :4]:
-        r_o, r_d, i_, j_ = get_rays_np_continuous(H, W, K, p)
-        rays.append([r_o, r_d])
-        ij.append([i_, j_])
-    rays = np.stack(rays, 0)  # [V, ro+rd=2, H, W, 3]
-    ij = np.stack(ij, 0)  # [V, 2, H, W]
-    images_train = sample_bilinear(images_train_, ij)  # [T, V, H, W, 3]
-
-    rays = np.transpose(rays, [0, 2, 3, 1, 4])  # [V, H, W, ro+rd=2, 3]
-    rays = np.reshape(rays, [-1, 2, 3])  # [VHW, ro+rd=2, 3]
-    rays = rays.astype(np.float32)
-    print('done')
-    i_batch = 0
-
-    # Move training data to GPU
-    images_train = torch.Tensor(images_train).flatten(start_dim=1, end_dim=3)  # [T, VHW, 3]
-    # images_train = images_train.reshape((images_train.shape[0], -1, 3))
-    T, S, _ = images_train.shape
-    rays = torch.Tensor(rays).to(device)
-    ray_idxs = torch.randperm(rays.shape[0])
-
-    loss_list = []
-    psnr_list = []
-    start = start + 1
     loss_meter, psnr_meter = AverageMeter(), AverageMeter()
     flow_loss_meter, scale_meter, norm_meter = AverageMeter(), AverageMeter(), AverageMeter()
     u_loss_meter, v_loss_meter, w_loss_meter, d_loss_meter = AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter()
@@ -1255,222 +938,138 @@ def train():
     den2vel_loss_meter = AverageMeter()
     vel_loss_meter = AverageMeter()
 
-    print('creating grid')
-    # construct simulation domain grid
-    xs, ys, zs = torch.meshgrid([torch.linspace(0, 1, rx), torch.linspace(0, 1, ry), torch.linspace(0, 1, rz)],
-                                indexing='ij')
+    ## START
+    rx, ry, rz, proj_y, use_project, y_start = args.sim_res_x, args.sim_res_y, args.sim_res_z, args.proj_y, args.use_project, args.y_start
+
+    xs, ys, zs = torch.meshgrid([torch.linspace(0, 1, rx), torch.linspace(0, 1, ry), torch.linspace(0, 1, rz)], indexing='ij')
+    boundary_types = ti.Matrix([[1, 1], [2, 1], [1, 1]], ti.i32)  # boundaries: 1 means Dirichlet, 2 means Neumann
+    project_solver = MGPCG_3(boundary_types=boundary_types, N=[rx, proj_y, rz], base_level=3)
     coord_3d_sim = torch.stack([xs, ys, zs], dim=-1)  # [X, Y, Z, 3]
-    coord_3d_world = bbox_model.sim2world(coord_3d_sim)  # [X, Y, Z, 3]
+    coord_3d_world = BBOX_MODEL_gpu.sim2world(coord_3d_sim)  # [X, Y, Z, 3]
+    ## END
 
-    print('done')
+    for ITERATION in range(1, 2):
+        IMAGE_TRAIN_gpu, RAYs_gpu, RAY_IDX_gpu = do_resample_rays(H_int, W_int)
+        for i in tqdm.trange(0, RAY_IDX_gpu.shape[0], batch_size):
+            BATCH_RAYs_O_gpu, BATCH_RAYs_D_gpu, BATCH_RAYs_IDX_gpu = get_ray_batch(RAYs_gpu, RAY_IDX_gpu, i, i + batch_size)  # [batch_size, 3], [batch_size, 3], [batch_size]
+            FRAMES_INTERPOLATED_gpu, TIME_STEPs_gpu = get_frames_at_times(IMAGE_TRAIN_gpu, IMAGE_TRAIN_gpu.shape[0], time_size)  # [N_times, N x H x W, 3], [N_times]
+            TARGET_S_gpu = FRAMES_INTERPOLATED_gpu[:, BATCH_RAYs_IDX_gpu].flatten(0, 1)  # [batch_size * N_times, 3]
 
-    print('start training: from {} to {}'.format(start, args.N_iters))
+            OPTIMIZER.zero_grad()
+            OPTIMIZER_v.zero_grad()
 
-    resample_rays = False
-    for i in trange(start, args.N_iters + 1):
-        # Sample random ray batch
-        batch_ray_idx = ray_idxs[i_batch:i_batch + N_rand]
-        batch_rays = rays[batch_ray_idx]  # [B, 2, 3]
-        batch_rays = torch.transpose(batch_rays, 0, 1)  # [2, B, 3]
+            POINTS_gpu, DISTs_gpu = get_points(BATCH_RAYs_O_gpu, BATCH_RAYs_D_gpu, NEAR_float, FAR_float, depth_size, randomize=True)  # [batch_size, N_depths, 3]
+            for TIME_STEP_gpu in TIME_STEPs_gpu:
+                POINTS_TIME_gpu = torch.cat([POINTS_gpu, TIME_STEP_gpu.expand(POINTS_gpu[..., :1].shape)], dim=-1)  # [batch_size, N_depths, 4]
 
-        i_batch += N_rand
-        # temporal bilinear sampling
-        time_idx = torch.randperm(T)[:args.N_time].float().to(device)  # [N_t]
-        time_idx += torch.randn(args.N_time) - 0.5  # -0.5 ~ 0.5
-        time_idx_floor = torch.floor(time_idx).long()
-        time_idx_ceil = torch.ceil(time_idx).long()
-        time_idx_floor = torch.clamp(time_idx_floor, 0, T - 1)
-        time_idx_ceil = torch.clamp(time_idx_ceil, 0, T - 1)
-        time_idx_residual = time_idx - time_idx_floor.float()
-        frames_floor = images_train[time_idx_floor]  # [N_t, VHW, 3]
-        frames_ceil = images_train[time_idx_ceil]  # [N_t, VHW, 3]
-        frames_interp = frames_floor * (1 - time_idx_residual).unsqueeze(-1) + \
-                        frames_ceil * time_idx_residual.unsqueeze(-1)  # [N_t, VHW, 3]
-        time_step = time_idx / (T - 1) if T > 1 else torch.zeros_like(time_idx)
-        points = frames_interp[:, batch_ray_idx]  # [N_t, B, 3]
-        # points = torch.from_numpy(points).to(device)
-        target_s = points.flatten(0, 1)  # [N_t*B, 3]
+                ## START
+                RGB_MAP, _d_x, _d_y, _d_z, _d_t, pts, raw_d = get_raw(POINTS_TIME_gpu, DISTs_gpu, BATCH_RAYs_D_gpu, BBOX_MODEL_gpu, MODEL_gpu, ENCODER_gpu)
+                if args.no_vel_der:
+                    raw_vel, raw_f = get_velocity_and_derivitives(pts, no_vel_der=True, **render_kwargs_train_vel)
+                    _u_x, _u_y, _u_z, _u_t = None, None, None, None
+                else:
+                    raw_vel, raw_f, _u_x, _u_y, _u_z, _u_t = get_velocity_and_derivitives(pts, no_vel_der=False, **render_kwargs_train_vel)
+                split_nse = PDE_EQs(_d_t, _d_x, _d_y, _d_z, raw_vel, raw_f, _u_t, _u_x, _u_y, _u_z, detach=args.detach_vel)
+                nse_errors = [mean_squared_error(x, 0.0) for x in split_nse]
+                if torch.stack(nse_errors).sum() > 10000:
+                    print(f'skip large loss {torch.stack(nse_errors).sum():.3g}, timestep={pts[0, 3]}')
+                    continue
+                nseloss_fine = 0.0
+                split_nse_wei = [args.flow_weight, args.vel_weight, args.vel_weight, args.vel_weight, args.d_weight] if not args.no_vel_der else [args.flow_weight]
 
-        if i_batch >= rays.shape[0]:
-            print("Shuffle data after an epoch!")
-            ray_idxs = torch.randperm(rays.shape[0])
-            i_batch = 0
-            resample_rays = True
+                img2mse = lambda x, y: torch.mean((x - y) ** 2)
+                img_loss = img2mse(RGB_MAP, TARGET_S_gpu)
+                loss_meter.update(img_loss.item())
+                flow_loss_meter.update(split_nse_wei[0] * nse_errors[0].item())
+                scale_meter.update(nse_errors[-1].item())
+                norm_meter.update((split_nse_wei[-1] * nse_errors[-1]).item())
+                if not args.no_vel_der:
+                    u_loss_meter.update((nse_errors[1]).item())
+                    v_loss_meter.update((nse_errors[2]).item())
+                    w_loss_meter.update((nse_errors[3]).item())
+                    d_loss_meter.update((nse_errors[4]).item())
+                for ei, wi in zip(nse_errors, split_nse_wei):
+                    nseloss_fine = ei * wi + nseloss_fine
 
-        #####  Core optimization loop  #####
-        optimizer.zero_grad()
-        optimizer_vel.zero_grad()
+                if args.proj_weight > 0:
+                    # initialize density field
+                    coord_time_step = torch.ones_like(coord_3d_world[..., :1]) * TIME_STEP_gpu
+                    coord_4d_world = torch.cat([coord_3d_world, coord_time_step], dim=-1)  # [X, Y, Z, 4]
+                    vel_world = batchify_query(coord_4d_world, render_kwargs_train_vel['network_vel_fn'])  # [X, Y, Z, 3]
+                    # y_start = args.y_start
+                    vel_world_supervised = vel_world.detach().clone()
+                    # vel_world_supervised[:, y_start:y_start + proj_y] = project_solver.Poisson(
+                    #     vel_world_supervised[:, y_start:y_start + proj_y])
 
-        extras = render(H, W, K, rays=batch_rays, time_step=time_step,
-                        **render_kwargs_train)
-        rgb = extras[0]
-        extras = extras[1]
+                    vel_world_supervised[..., 2] *= -1
+                    vel_world_supervised[:, y_start:y_start + proj_y] = project_solver.Poisson(
+                        vel_world_supervised[:, y_start:y_start + proj_y])
+                    vel_world_supervised[..., 2] *= -1
 
-        pts = extras['pts']
-        if args.no_vel_der:
-            raw_vel, raw_f = get_velocity_and_derivitives(pts, no_vel_der=True, **render_kwargs_train_vel)
-            _u_x, _u_y, _u_z, _u_t = None, None, None, None
-        else:
-            raw_vel, raw_f, _u_x, _u_y, _u_z, _u_t = get_velocity_and_derivitives(pts, no_vel_der=False,
-                                                                                  **render_kwargs_train_vel)
-        _d_t = extras['_d_t']
-        _d_x = extras['_d_x']
-        _d_y = extras['_d_y']
-        _d_z = extras['_d_z']
+                    proj_loss = img2mse(vel_world_supervised, vel_world)
+                else:
+                    proj_loss = torch.zeros_like(img_loss)
 
-        split_nse = PDE_EQs(
-            _d_t, _d_x, _d_y, _d_z,
-            raw_vel, raw_f, _u_t, _u_x, _u_y, _u_z, detach=args.detach_vel)
-        nse_errors = [mean_squared_error(x, 0.0) for x in split_nse]
-        if torch.stack(nse_errors).sum() > 10000:
-            print(f'skip large loss {torch.stack(nse_errors).sum():.3g}, timestep={pts[0, 3]}')
-            continue
+                if args.d2v_weight > 0:
+                    viz_dens_mask = raw_d.detach() > 0.1
+                    vel_norm = raw_vel.norm(dim=-1, keepdim=True)
+                    min_vel_mask = vel_norm.detach() < args.coef_den2vel * raw_d.detach()
+                    vel_reg_mask = min_vel_mask & viz_dens_mask
+                    min_vel_reg_map = (args.coef_den2vel * raw_d - vel_norm) * vel_reg_mask.float()
+                    min_vel_reg = min_vel_reg_map.pow(2).mean()
+                    # ipdb.set_trace()
+                else:
+                    min_vel_reg = torch.zeros_like(img_loss)
 
-        nseloss_fine = 0.0
-        split_nse_wei = [args.flow_weight, args.vel_weight, args.vel_weight, args.vel_weight, args.d_weight] if not args.no_vel_der \
-            else [args.flow_weight]
+                proj_loss_meter.update(proj_loss.item())
+                den2vel_loss_meter.update(min_vel_reg.item())
 
-        img_loss = img2mse(rgb, target_s)
-        psnr = mse2psnr(img_loss)
-        loss_meter.update(img_loss.item())
-        psnr_meter.update(psnr.item())
+                vel_loss = nseloss_fine + args.rec_weight * img_loss + args.proj_weight * proj_loss + args.d2v_weight * min_vel_reg
+                vel_loss_meter.update(vel_loss.item())
+                vel_loss.backward()
 
-        # adhoc
-        flow_loss_meter.update(split_nse_wei[0] * nse_errors[0].item())
-        scale_meter.update(nse_errors[-1].item())
-        norm_meter.update((split_nse_wei[-1] * nse_errors[-1]).item())
-        if not args.no_vel_der:
-            u_loss_meter.update((nse_errors[1]).item())
-            v_loss_meter.update((nse_errors[2]).item())
-            w_loss_meter.update((nse_errors[3]).item())
-            d_loss_meter.update((nse_errors[4]).item())
+                OPTIMIZER.step()
+                OPTIMIZER_v.step()
 
-        for ei, wi in zip(nse_errors, split_nse_wei):
-            nseloss_fine = ei * wi + nseloss_fine
+                decay_rate = 0.1
+                decay_steps = lrate_decay
+                new_lrate = lrate * (decay_rate ** (global_step / decay_steps))
+                for param_group in OPTIMIZER.param_groups:
+                    param_group['lr'] = new_lrate
+                for param_group in OPTIMIZER_v.param_groups:
+                    param_group['lr'] = new_lrate
 
-        if args.proj_weight > 0:
-            # initialize density field
-            coord_time_step = torch.ones_like(coord_3d_world[..., :1]) * time_step[0]
-            coord_4d_world = torch.cat([coord_3d_world, coord_time_step], dim=-1)  # [X, Y, Z, 4]
-            vel_world = batchify_query(coord_4d_world, render_kwargs_train_vel['network_vel_fn'])  # [X, Y, Z, 3]
-            # y_start = args.y_start
-            vel_world_supervised = vel_world.detach().clone()
-            # vel_world_supervised[:, y_start:y_start + proj_y] = project_solver.Poisson(
-            #     vel_world_supervised[:, y_start:y_start + proj_y])
+                if i % args.i_print == 0:
+                    tqdm.tqdm.write(
+                        f"[TRAIN] Iter: {i} Rec Loss:{loss_meter.avg:.2g} PSNR:{psnr_meter.avg:.4g} Flow Loss: {flow_loss_meter.avg:.2g}, "
+                        f"U loss: {u_loss_meter.avg:.2g}, V loss: {v_loss_meter.avg:.2g}, W loss: {w_loss_meter.avg:.2g},"
+                        f" d loss: {d_loss_meter.avg:.2g}, proj Loss:{proj_loss_meter.avg:.2g}, den2vel loss:{den2vel_loss_meter.avg:.2g}, Vel Loss: {vel_loss_meter.avg:.2g} ")
+                    loss_meter.reset()
+                    psnr_meter.reset()
+                    flow_loss_meter.reset()
+                    scale_meter.reset()
+                    vel_loss_meter.reset()
+                    norm_meter.reset()
+                    u_loss_meter.reset()
+                    v_loss_meter.reset()
+                    w_loss_meter.reset()
+                    d_loss_meter.reset()
+                ## END
 
-            vel_world_supervised[..., 2] *= -1
-            vel_world_supervised[:, y_start:y_start + proj_y] = project_solver.Poisson(
-                vel_world_supervised[:, y_start:y_start + proj_y])
-            vel_world_supervised[..., 2] *= -1
+                global_step += 1
 
-            proj_loss = img2mse(vel_world_supervised, vel_world)
-        else:
-            proj_loss = torch.zeros_like(img_loss)
-
-        if args.d2v_weight > 0:
-            raw_d = extras['raw_d']
-            viz_dens_mask = raw_d.detach() > 0.1
-            vel_norm = raw_vel.norm(dim=-1, keepdim=True)
-            min_vel_mask = vel_norm.detach() < args.coef_den2vel * raw_d.detach()
-            vel_reg_mask = min_vel_mask & viz_dens_mask
-            min_vel_reg_map = (args.coef_den2vel * raw_d - vel_norm) * vel_reg_mask.float()
-            min_vel_reg = min_vel_reg_map.pow(2).mean()
-            # ipdb.set_trace()
-        else:
-            min_vel_reg = torch.zeros_like(img_loss)
-
-        proj_loss_meter.update(proj_loss.item())
-        den2vel_loss_meter.update(min_vel_reg.item())
-
-        vel_loss = nseloss_fine + args.rec_weight * img_loss + args.proj_weight * proj_loss + args.d2v_weight * min_vel_reg
-        vel_loss_meter.update(vel_loss.item())
-        vel_loss.backward()
-
-        if args.debug:
-            print('vel loss', vel_loss.item())
-            print('img loss', args.rec_weight * img_loss.item())
-            print('testing gradients')
-            grad_vel = render_kwargs_train_vel['network_fn'].sigma_net[0].weight.grad
-            print('vel', grad_vel)
-            if grad_vel is not None:
-                print('vel', grad_vel.max(), grad_vel.min(), grad_vel.shape)
-            grad_hashtable = render_kwargs_train_vel['embed_fn'].hash_table.grad
-            print('hashtable', grad_hashtable)
-            if grad_hashtable is not None:
-                print('hashtable', grad_hashtable.max(), grad_hashtable.min(), grad_hashtable.shape)
-            grad_density = render_kwargs_train['network_fn'].sigma_net[0].weight.grad
-            print('density', grad_density)
-            if grad_density is not None:
-                print('density', grad_density.max(), grad_density.min(), grad_density.shape)
-            grad_hashtable = render_kwargs_train['embed_fn'].hash_table.grad
-            print('hashtable', grad_hashtable)
-            if grad_hashtable is not None:
-                print('hashtable', grad_hashtable.max(), grad_hashtable.min(), grad_hashtable.shape)
-
-        optimizer_vel.step()
-        optimizer.step()
-
-        ###   update learning rate   ###
-        decay_rate = 0.1
-        decay_steps = args.lrate_decay
-        new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
-        for param_group in optimizer_vel.param_groups:
-            param_group['lr'] = new_lrate
-
-        if i % args.i_print == 0:
-            tqdm.write(
-                f"[TRAIN] Iter: {i} Rec Loss:{loss_meter.avg:.2g} PSNR:{psnr_meter.avg:.4g} Flow Loss: {flow_loss_meter.avg:.2g}, "
-                f"U loss: {u_loss_meter.avg:.2g}, V loss: {v_loss_meter.avg:.2g}, W loss: {w_loss_meter.avg:.2g},"
-                f" d loss: {d_loss_meter.avg:.2g}, proj Loss:{proj_loss_meter.avg:.2g}, den2vel loss:{den2vel_loss_meter.avg:.2g}, Vel Loss: {vel_loss_meter.avg:.2g} ")
-            loss_list.append(loss_meter.avg)
-            psnr_list.append(psnr_meter.avg)
-            loss_psnr = {
-                "losses": loss_list,
-                "psnr": psnr_list,
-            }
-            loss_meter.reset()
-            psnr_meter.reset()
-            flow_loss_meter.reset()
-            scale_meter.reset()
-            vel_loss_meter.reset()
-            norm_meter.reset()
-            u_loss_meter.reset()
-            v_loss_meter.reset()
-            w_loss_meter.reset()
-            d_loss_meter.reset()
-
-            with open(os.path.join(basedir, expname, "loss_vs_time.json"), "w") as fp:
-                json.dump(loss_psnr, fp)
-        if resample_rays:
-            print("Sampling new rays!")
-            if rays is not None:
-                del rays
-                torch.cuda.empty_cache()
-            rays = []
-            ij = []
-            for p in poses_train[:, :3, :4]:
-                r_o, r_d, i_, j_ = get_rays_np_continuous(H, W, K, p)
-                rays.append([r_o, r_d])
-                ij.append([i_, j_])
-            rays = np.stack(rays, 0)  # [V, ro+rd=2, H, W, 3]
-            ij = np.stack(ij, 0)  # [V, 2, H, W]
-            images_train = sample_bilinear(images_train_, ij)  # [T, V, H, W, 3]
-            rays = np.transpose(rays, [0, 2, 3, 1, 4])  # [V, H, W, ro+rd=2, 3]
-            rays = np.reshape(rays, [-1, 2, 3])  # [VHW, ro+rd=2, 3]
-            rays = rays.astype(np.float32)
-
-            # Move training data to GPU
-            images_train = torch.Tensor(images_train).flatten(start_dim=1, end_dim=3)  # [T, VHW, 3]
-            rays = torch.Tensor(rays).to(device)
-
-            ray_idxs = torch.randperm(rays.shape[0])
-            i_batch = 0
-            resample_rays = False
-
-        global_step += 1
-
-
-if __name__ == '__main__':
-    torch.set_default_tensor_type('torch.cuda.FloatTensor')
-
-    train()
+        os.makedirs("checkpoint", exist_ok=True)
+        path = os.path.join("checkpoint", 'den_{:06d}.tar'.format(ITERATION))
+        torch.save({
+            'global_step': global_step,
+            'network_fn_state_dict': MODEL_gpu.state_dict(),
+            'embed_fn_state_dict': ENCODER_gpu.state_dict(),
+            'optimizer_state_dict': OPTIMIZER.state_dict(),
+        }, path)
+        path = os.path.join("checkpoint", 'vel_{:06d}.tar'.format(ITERATION))
+        torch.save({
+            'global_step': global_step,
+            'network_fn_state_dict': MODEL_v_gpu.state_dict(),
+            'embed_fn_state_dict': ENCODER_v_gpu.state_dict(),
+            'optimizer_state_dict': OPTIMIZER_v.state_dict(),
+        }, path)
