@@ -1099,8 +1099,12 @@ def train():
 
     # Create nerf model
     ############################
-    from src.encoder2 import HashEncoderNative
-    embed_fn = HashEncoderNative(max_res=args.finest_resolution, min_res=args.base_resolution, device=device)
+    from src.encoder import HashEncoderHyFluid
+    max_res = np.array([args.finest_resolution, args.finest_resolution, args.finest_resolution, args.finest_resolution_t])
+    min_res = np.array([args.base_resolution, args.base_resolution, args.base_resolution, args.base_resolution_t])
+
+    embed_fn = HashEncoderHyFluid(max_res=max_res, min_res=min_res, num_scales=args.num_levels,
+                                  max_params=2 ** args.log2_hashmap_size)
     input_ch = embed_fn.num_scales * 2  # default 2 params per scale
     embedding_params = list(embed_fn.parameters())
 
@@ -1147,7 +1151,11 @@ def train():
 
     # Create nerf model
     ############################
-    embed_fn_v = HashEncoderNative(max_res=args.finest_resolution_v, min_res=args.base_resolution_v, device=device)
+    max_res_v = np.array([args.finest_resolution_v, args.finest_resolution_v, args.finest_resolution_v, args.finest_resolution_v_t])
+    min_res_v = np.array([args.base_resolution_v, args.base_resolution_v, args.base_resolution_v, args.base_resolution_v_t])
+
+    embed_fn_v = HashEncoderHyFluid(max_res=max_res_v, min_res=min_res_v, num_scales=args.num_levels,
+                                    max_params=2 ** args.log2_hashmap_size)
     input_ch_v = embed_fn_v.num_scales * 2  # default 2 params per scale
     embedding_params_v = list(embed_fn_v.parameters())
 
