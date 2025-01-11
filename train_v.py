@@ -844,10 +844,10 @@ if __name__ == '__main__':
 
     max_res = np.array([args.finest_resolution, args.finest_resolution, args.finest_resolution, args.finest_resolution_t])
     min_res = np.array([args.base_resolution, args.base_resolution, args.base_resolution, args.base_resolution_t])
-    ENCODER_gpu = HashEncoderHyFluid(max_res=max_res, min_res=min_res, num_scales=args.num_levels, max_params=2 ** args.log2_hashmap_size)
+    ENCODER_gpu = HashEncoderHyFluid(max_res=max_res, min_res=min_res, num_scales=args.num_levels, max_params=2 ** args.log2_hashmap_size).to(device)
     max_res_v = np.array([args.finest_resolution_v, args.finest_resolution_v, args.finest_resolution_v, args.finest_resolution_v_t])
     min_res_v = np.array([args.base_resolution_v, args.base_resolution_v, args.base_resolution_v, args.base_resolution_v_t])
-    ENCODER_v_gpu = HashEncoderHyFluid(max_res=max_res_v, min_res=min_res_v, num_scales=args.num_levels, max_params=2 ** args.log2_hashmap_size)
+    ENCODER_v_gpu = HashEncoderHyFluid(max_res=max_res_v, min_res=min_res_v, num_scales=args.num_levels, max_params=2 ** args.log2_hashmap_size).to(device)
     ############################## Load Encoder ##############################
 
     ############################## Load Model ##############################
@@ -926,7 +926,6 @@ if __name__ == '__main__':
     time_size = 1
     depth_size = 192
     global_step = 1
-    GRAD_vars = list(MODEL_gpu.parameters()) + list(ENCODER_gpu.parameters()) + list(MODEL_v_gpu.parameters()) + list(ENCODER_v_gpu.parameters())
 
     lrate = 0.01
     lrate_decay = 100000
@@ -941,7 +940,7 @@ if __name__ == '__main__':
     ## START
     rx, ry, rz, proj_y, use_project, y_start = args.sim_res_x, args.sim_res_y, args.sim_res_z, args.proj_y, args.use_project, args.y_start
 
-    xs, ys, zs = torch.meshgrid([torch.linspace(0, 1, rx), torch.linspace(0, 1, ry), torch.linspace(0, 1, rz)], indexing='ij')
+    xs, ys, zs = torch.meshgrid([torch.linspace(0, 1, rx, device=device), torch.linspace(0, 1, ry, device=device), torch.linspace(0, 1, rz, device=device)], indexing='ij')
     boundary_types = ti.Matrix([[1, 1], [2, 1], [1, 1]], ti.i32)  # boundaries: 1 means Dirichlet, 2 means Neumann
     project_solver = MGPCG_3(boundary_types=boundary_types, N=[rx, proj_y, rz], base_level=3)
     coord_3d_sim = torch.stack([xs, ys, zs], dim=-1)  # [X, Y, Z, 3]
