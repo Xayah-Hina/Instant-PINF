@@ -1,13 +1,11 @@
 import numpy as np
 import torch
-import src.radam as radam
 import src.model as mmodel
-
-import os
-import math
-import time
+import src.mgpcg as mmgpcg
+import src.advect as madvect
 
 import taichi as ti
+import os
 
 
 def get_rays(H, W, K, c2w):
@@ -74,11 +72,33 @@ def get_raw2(POINTS_TIME: torch.Tensor, DISTs: torch.Tensor, RAYs_D_FLAT: torch.
     return rgb_map
 
 
+def batchify_query(inputs, query_function, batch_size=2 ** 22):
+    """
+    args:
+        inputs: [..., input_dim]
+    return:
+        outputs: [..., output_dim]
+    """
+    input_dim = inputs.shape[-1]
+    input_shape = inputs.shape
+    inputs = inputs.view(-1, input_dim)  # flatten all but last dim
+    N = inputs.shape[0]
+    outputs = []
+    for i in range(0, N, batch_size):
+        output = query_function(inputs[i:i + batch_size])
+        if isinstance(output, tuple):
+            output = output[0]
+        outputs.append(output)
+    outputs = torch.cat(outputs, dim=0)
+    return outputs.view(*input_shape[:-1], -1)  # unflatten
+
+
 if __name__ == '__main__':
     device = torch.device("cuda")
     ti.init(arch=ti.cuda, device_memory_GB=12.0)
     np.random.seed(0)
 
+    ############################## Load Args ##############################
     args_npz = np.load("args.npz", allow_pickle=True)
     from types import SimpleNamespace
 
@@ -88,7 +108,9 @@ if __name__ == '__main__':
         value
         for key, value in args_npz.items()
     })
+    ############################## Load Args ##############################
 
+    ############################## Load Data ##############################
     pinf_data_test = np.load("test_dataset.npz")
     IMAGE_TEST_np = pinf_data_test['images_test']
     POSES_TEST_np = pinf_data_test['poses_test']
@@ -101,6 +123,7 @@ if __name__ == '__main__':
     W = int(HWF_np[1])
     FOCAL = float(HWF_np[2])
     K = np.array([[FOCAL, 0, 0.5 * W], [0, FOCAL, 0.5 * H], [0, 0, 1]])
+    ############################## Load Data ##############################
 
     test_view_pose = torch.tensor(POSES_TEST_np[0], device=device, dtype=torch.float32)
     N_timesteps = IMAGE_TEST_np.shape[0]
@@ -114,7 +137,7 @@ if __name__ == '__main__':
 
     ############################## Load Encoder ##############################
     ckpt_d = torch.load("checkpoint/den_000007.tar")
-    # ckpt_v = torch.load("checkpoint/vel_000007.tar")
+    ckpt_v = torch.load("checkpoint/vel_000007.tar")
     ############################## Load Encoder ##############################
 
     ############################## Load Encoder ##############################
@@ -124,10 +147,10 @@ if __name__ == '__main__':
     min_res = np.array([args.base_resolution, args.base_resolution, args.base_resolution, args.base_resolution_t])
     ENCODER_gpu = HashEncoderHyFluid(max_res=max_res, min_res=min_res, num_scales=args.num_levels, max_params=2 ** args.log2_hashmap_size).to(device)
     ENCODER_gpu.load_state_dict(ckpt_d['embed_fn_state_dict'])
-    # max_res_v = np.array([args.finest_resolution_v, args.finest_resolution_v, args.finest_resolution_v, args.finest_resolution_v_t])
-    # min_res_v = np.array([args.base_resolution_v, args.base_resolution_v, args.base_resolution_v, args.base_resolution_v_t])
-    # ENCODER_v_gpu = HashEncoderHyFluid(max_res=max_res_v, min_res=min_res_v, num_scales=args.num_levels, max_params=2 ** args.log2_hashmap_size).to(device)
-    # ENCODER_v_gpu.load_state_dict(ckpt_v['embed_fn_state_dict'])
+    max_res_v = np.array([args.finest_resolution_v, args.finest_resolution_v, args.finest_resolution_v, args.finest_resolution_v_t])
+    min_res_v = np.array([args.base_resolution_v, args.base_resolution_v, args.base_resolution_v, args.base_resolution_v_t])
+    ENCODER_v_gpu = HashEncoderHyFluid(max_res=max_res_v, min_res=min_res_v, num_scales=args.num_levels, max_params=2 ** args.log2_hashmap_size).to(device)
+    ENCODER_v_gpu.load_state_dict(ckpt_v['embed_fn_state_dict'])
     ############################## Load Encoder ##############################
 
     ############################## Load Model ##############################
@@ -138,14 +161,14 @@ if __name__ == '__main__':
                                  hidden_dim_color=16,
                                  input_ch=ENCODER_gpu.num_scales * 2).to(device)
     MODEL_gpu.load_state_dict(ckpt_d['network_fn_state_dict'])
-    # MODEL_v_gpu = mmodel.NeRFSmallPotential(num_layers=args.vel_num_layers,
-    #                                         hidden_dim=64,
-    #                                         geo_feat_dim=15,
-    #                                         num_layers_color=2,
-    #                                         hidden_dim_color=16,
-    #                                         input_ch=ENCODER_v_gpu.num_scales * 2,
-    #                                         use_f=args.use_f).to(device)
-    # MODEL_v_gpu.load_state_dict(ckpt_v['network_fn_state_dict_v'])
+    MODEL_v_gpu = mmodel.NeRFSmallPotential(num_layers=args.vel_num_layers,
+                                            hidden_dim=64,
+                                            geo_feat_dim=15,
+                                            num_layers_color=2,
+                                            hidden_dim_color=16,
+                                            input_ch=ENCODER_v_gpu.num_scales * 2,
+                                            use_f=args.use_f).to(device)
+    MODEL_v_gpu.load_state_dict(ckpt_v['network_fn_state_dict_v'])
     ############################## Load Model ##############################
 
     ############################## Load BoundingBox ##############################
@@ -157,6 +180,7 @@ if __name__ == '__main__':
 
     import tqdm
     import imageio
+
     os.makedirs("output_v", exist_ok=True)
     with torch.no_grad():
         for i in tqdm.trange(0, test_timesteps.shape[0]):
@@ -167,3 +191,31 @@ if __name__ == '__main__':
             to8b = lambda x: (255 * np.clip(x, 0, 1)).astype(np.uint8)
             rgb8 = to8b(rgb_map.cpu().numpy())
             imageio.imsave(os.path.join("output_v", 'rgb_{:03d}.png'.format(i)), rgb8)
+
+    with torch.no_grad():
+        rx, ry, rz, proj_y, use_project, y_start = args.sim_res_x, args.sim_res_y, args.sim_res_z, args.proj_y, args.use_project, args.y_start
+        xs, ys, zs = torch.meshgrid([torch.linspace(0, 1, rx, device=device), torch.linspace(0, 1, ry, device=device), torch.linspace(0, 1, rz, device=device)], indexing='ij')
+        boundary_types = ti.Matrix([[1, 1], [2, 1], [1, 1]], ti.i32)  # boundaries: 1 means Dirichlet, 2 means Neumann
+        project_solver = mmgpcg.MGPCG_3(boundary_types=boundary_types, N=[rx, proj_y, rz], base_level=3)
+        coord_3d_sim = torch.stack([xs, ys, zs], dim=-1)  # [X, Y, Z, 3]
+        coord_3d_world = BBOX_MODEL_gpu.sim2world(coord_3d_sim)  # [X, Y, Z, 3]
+        dt = test_timesteps[1] - test_timesteps[0]
+
+        ############################## Get Source Density ##############################
+        time_step = torch.ones_like(coord_3d_world[..., :1]) * test_timesteps[0]
+        coord_4d_world = torch.cat([coord_3d_world, time_step], dim=-1)  # [X, Y, Z, 4]
+        network_query_fn = lambda x: MODEL_gpu(ENCODER_gpu(x))
+        den_source = batchify_query(coord_4d_world, network_query_fn)
+        network_query_fn_vel = lambda x: MODEL_v_gpu(ENCODER_v_gpu(x))
+        vel_source = batchify_query(coord_4d_world, network_query_fn_vel)  # [X, Y, Z, 3]
+
+        source_height = 0.25
+        y_start = int(source_height * ry)
+        den_cur = den_source.clone()
+        for frame in tqdm.trange(1, test_timesteps.shape[0]):
+            mask_to_sim = coord_3d_sim[..., 1] > source_height
+            coord_4d_world[..., 3] = test_timesteps[frame - 1]
+            vel_cur = batchify_query(coord_4d_world, network_query_fn_vel)  # [X, Y, Z, 3]
+            den_cur, vel_cur = madvect.advect_maccormack(q_grid=den_cur, vel_world_prev=vel_cur, coord_3d_sim=coord_3d_world, dt=dt, y_start=y_start, proj_y=proj_y, use_project=use_project, project_solver=project_solver, bbox_model=BBOX_MODEL_gpu)
+
+# TODO:
