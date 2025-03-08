@@ -202,20 +202,40 @@ if __name__ == '__main__':
         dt = test_timesteps[1] - test_timesteps[0]
 
         ############################## Get Source Density ##############################
-        time_step = torch.ones_like(coord_3d_world[..., :1]) * test_timesteps[0]
-        coord_4d_world = torch.cat([coord_3d_world, time_step], dim=-1)  # [X, Y, Z, 4]
-        network_query_fn = lambda x: MODEL_gpu(ENCODER_gpu(x))
-        den_source = batchify_query(coord_4d_world, network_query_fn)
-        network_query_fn_vel = lambda x: MODEL_v_gpu(ENCODER_v_gpu(x))
-        vel_source = batchify_query(coord_4d_world, network_query_fn_vel)  # [X, Y, Z, 3]
 
-        source_height = 0.25
-        y_start = int(source_height * ry)
-        den_cur = den_source.clone()
-        for frame in tqdm.trange(1, test_timesteps.shape[0]):
-            mask_to_sim = coord_3d_sim[..., 1] > source_height
-            coord_4d_world[..., 3] = test_timesteps[frame - 1]
-            vel_cur = batchify_query(coord_4d_world, network_query_fn_vel)  # [X, Y, Z, 3]
-            den_cur, vel_cur = madvect.advect_maccormack(q_grid=den_cur, vel_world_prev=vel_cur, coord_3d_sim=coord_3d_world, dt=dt, y_start=y_start, proj_y=proj_y, use_project=use_project, project_solver=project_solver, bbox_model=BBOX_MODEL_gpu)
+        for i in tqdm.trange(0, test_timesteps.shape[0]):
+            time_step = torch.ones_like(coord_3d_world[..., :1]) * test_timesteps[i]
+            coord_4d_world = torch.cat([coord_3d_world, time_step], dim=-1)
+            network_query_fn = lambda x: MODEL_gpu(ENCODER_gpu(x))
+            den = batchify_query(coord_4d_world, network_query_fn)
+            network_query_fn_vel = lambda x: MODEL_v_gpu(ENCODER_v_gpu(x))
+            vel = batchify_query(coord_4d_world, network_query_fn_vel)  # [X, Y, Z, 3]
+            os.makedirs("output_grid", exist_ok=True)
+            np.savez_compressed("output_grid/den_vel_{:03d}.npz".format(i), den=den.cpu().numpy(), vel=vel.cpu().numpy())
 
-# TODO:
+
+
+
+
+
+
+
+
+
+#         time_step = torch.ones_like(coord_3d_world[..., :1]) * test_timesteps[0]
+#         coord_4d_world = torch.cat([coord_3d_world, time_step], dim=-1)  # [X, Y, Z, 4]
+#         network_query_fn = lambda x: MODEL_gpu(ENCODER_gpu(x))
+#         den_source = batchify_query(coord_4d_world, network_query_fn)
+#         network_query_fn_vel = lambda x: MODEL_v_gpu(ENCODER_v_gpu(x))
+#         vel_source = batchify_query(coord_4d_world, network_query_fn_vel)  # [X, Y, Z, 3]
+#
+#         source_height = 0.25
+#         y_start = int(source_height * ry)
+#         den_cur = den_source.clone()
+#         for frame in tqdm.trange(1, test_timesteps.shape[0]):
+#             mask_to_sim = coord_3d_sim[..., 1] > source_height
+#             coord_4d_world[..., 3] = test_timesteps[frame - 1]
+#             vel_cur = batchify_query(coord_4d_world, network_query_fn_vel)  # [X, Y, Z, 3]
+#             den_cur, vel_cur = madvect.advect_maccormack(q_grid=den_cur, vel_world_prev=vel_cur, coord_3d_sim=coord_3d_world, dt=dt, y_start=y_start, proj_y=proj_y, use_project=use_project, project_solver=project_solver, bbox_model=BBOX_MODEL_gpu)
+#
+# # TODO:
